@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chronaeon"
+version = "0.3.1"
+authors = [
+  { name="Sergei L. Kosakovsky Pond", email="spond@temple.edu" },
+]
+description = "ChronAeon: Ultra-Fast Molecular Clock Dating, Phylodynamics, and Genomic Surveillance"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dependencies = [
+    "hyphaeon-core>=0.4.0",
+    "biopython>=1.80",
+    "numpy>=1.22.0",
+    "scipy>=1.9.0",
+    "pandas>=1.5.0",
+    "scikit-learn>=1.0",
+    "networkx>=3.0",
+    "matplotlib>=3.5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+chronaeon = "chronaeon.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[project.urls]
+"Homepage" = "https://github.com/veg/HyphAeon"
+"Bug Tracker" = "https://github.com/veg/HyphAeon/issues"
