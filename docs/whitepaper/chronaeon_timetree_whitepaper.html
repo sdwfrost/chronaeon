@@ -1,0 +1,1240 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>chronaeon_timetree_whitepaper</title>
+  <style>
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+  </style>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2/out/water.css" />
+  <script
+  src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml-full.js"
+  type="text/javascript"></script>
+</head>
+<body>
+<h1
+id="white-paper-the-chronaeon-timetree-chronaeon.timetree-algorithm-and-coalescent-skyline-dynamics">White
+Paper: The ChronAeon TimeTree (<code>chronaeon.timetree</code>)
+Algorithm and Coalescent Skyline Dynamics</h1>
+<p><strong>Authors:</strong> ChronAeon &amp; Phylodate Benchmark Working
+Group<br />
+<strong>Date:</strong> October 2026<br />
+<strong>Software Branch:</strong> <code>chronaeon</code>
+(<code>feat/chronaeon-timetree</code>, <code>v0.3.1</code> /
+<code>hyphaeon-core v0.4.0</code>) vs. <code>phylodate v0.0.1</code></p>
+<hr />
+<h2 id="abstract">Abstract</h2>
+<p>We present the mathematical formulation, algorithmic design, and
+demographic skyline evaluation of <strong>ChronAeon TimeTree</strong>
+(<code>chronaeon.timetree</code>), a hybrid distance-geometry and
+tree-isotonic solver that bridges tree-free molecular clock inference
+with full time-calibrated phylogenetic reconstruction. Unlike
+conventional post-hoc dating tools in <code>phylodate</code>
+(<code>lsd2</code>, <code>treetime</code>, <code>treedater</code>,
+<code>reltime</code>, <code>node_dating</code>, <code>wlogdate</code>,
+<code>chronumental</code>, <code>chronos</code>, <code>treepl</code>,
+<code>mdcat</code>)—which require an external maximum-likelihood
+substitution phylogeny (<span
+class="math inline">\(95\text{--}99.9\%\)</span> of total compute
+time)—and unlike baseline scalar <strong>ChronAeon Mode 1</strong>—which
+estimates only <span class="math inline">\((\hat{\mu},
+\hat{t}_{\mathrm{MRCA}})\)</span> and incurs a positive ancestral
+profile self-diversity offset <span class="math inline">\(+D(R,
+Q(\gamma^*))\)</span> on small trees—<code>chronaeon.timetree</code>
+recovers a complete, temporally consistent binary time-tree directly
+from either raw nucleotide sequences
+(<code>chronaeon_timetree_seq</code>) or substitution trees
+(<code>chronaeon_timetree_tree</code>) in <span
+class="math inline">\(5\text{--}900\text{ ms}\)</span>. Furthermore, we
+derive and benchmark the exact mathematical mechanisms governing how
+<strong>heterochronous coalescent skyline plots</strong> (<span
+class="math inline">\(\hat{N}_e(t)\)</span>) and
+<strong>Lineages-Through-Time (LTT)</strong> curves differ between
+<code>chronaeon.timetree</code> and <code>phylodate</code> timetrees
+across synthetic demographic trajectories (constant, exponential growth,
+and epidemic boom-bust) and empirical viral outbreaks (Rabies, Ebola,
+Chikungunya, and Dengue).</p>
+<hr />
+<h2
+id="motivation-bridging-continuous-distance-geometry-and-discrete-time-trees">1.
+Motivation: Bridging Continuous Distance Geometry and Discrete
+Time-Trees</h2>
+<p>Molecular clock dating methods historically divide into two
+paradigms:</p>
+<ol type="1">
+<li><strong>Two-Stage Substitution-Tree Calibration
+(<code>phylodate</code>)</strong>: A maximum-likelihood (ML) unrooted
+phylogeny <span class="math inline">\(T_u = (V, E, \mathbf{b})\)</span>
+with branch lengths <span class="math inline">\(b_e\)</span> (in
+substitutions/site) is first inferred via IQ-TREE or RAxML, after which
+internal node timestamps <span class="math inline">\(\mathbf{t}_I \in
+\mathbb{R}^{|V_I|}\)</span> and clock rate <span
+class="math inline">\(\mu\)</span> are estimated via constrained
+weighted least squares (<code>lsd2</code>, <code>node_dating</code>),
+penalized/Gamma likelihood (<code>treedater</code>,
+<code>chronos</code>, <code>treepl</code>), log-transformed rate
+regularization (<code>wlogdate</code>), differentiable optimization
+(<code>chronumental</code>), or iterative marginal message passing
+(<code>treetime</code>).</li>
+<li><strong>Tree-Free Continuous Distance Geometry
+(<code>chronaeon</code> Mode 1)</strong>: Given an alignment <span
+class="math inline">\(\mathbf{S} = \{s_1, \dots, s_N\} \in
+\{A,C,G,T\}^{N \times L}\)</span> with tip sampling times <span
+class="math inline">\(\mathbf{t} = (t_1, \dots, t_N)^\top\)</span>,
+ChronAeon constructs a continuous time-decay soft ancestral nucleotide
+profile <span class="math inline">\(Q(\gamma^*) \in \Delta^{L \times
+4}\)</span> and regresses analytical Tamura-Nei (TN93) divergences <span
+class="math inline">\(d_i(\gamma^*) = D_{\mathrm{TN93}}(s_i,
+Q(\gamma^*))\)</span> against <span
+class="math inline">\(t_i\)</span>.</li>
+</ol>
+<p>Each paradigm exhibits a distinct structural limitation: - <strong>ML
+Tree Bottleneck &amp; Root Sensitivity in
+<code>phylodate</code></strong>: Inferring <span
+class="math inline">\(T_u\)</span> requires <span
+class="math inline">\(O(N^2 L)\)</span> likelihood evaluations (<span
+class="math inline">\(10^1\text{--}10^3\text{ s}\)</span>), and
+downstream dating methods (<code>lsd2</code>, <code>treedater</code>,
+<code>reltime</code>, <code>wlogdate</code>) degrade severely if
+supplied an unrooted ML tree without explicit root optimization or when
+zero-mutation short branches (<span class="math inline">\(b_e =
+0\)</span>) attenuate the global clock rate <span
+class="math inline">\(\hat{\mu}\)</span>. - <strong>The Profile
+Self-Diversity Offset in Uncentered Scalar ChronAeon</strong>: On an
+additive tree with true root <span class="math inline">\(R\)</span>, the
+expected distance from tip <span class="math inline">\(i\)</span> to the
+convex combination <span class="math inline">\(Q(\gamma) = \sum_{j=1}^N
+w_j(\gamma) s_j\)</span> satisfies: <span
+class="math display">\[\mathbb{E}\big[D(s_i, Q(\gamma))\big] = d(R, s_i)
++ \underbrace{\sum_{j=1}^N w_j(\gamma) d(R, s_j)}_{+\,D(R, Q(\gamma))
+\;&gt;\; 0} - 2 \sum_{j=1}^N w_j(\gamma) d(R, \mathrm{MRCA}(i, j)).
+\tag{1}\]</span> Because the earliest tips lie at positive evolutionary
+distance from the true root <span class="math inline">\(R\)</span>, the
+constant term <span class="math inline">\(+D(R, Q(\gamma)) &gt;
+0\)</span> inflates the raw regression intercept <span
+class="math inline">\(d_0\)</span> and shifts the uncentered scalar
+estimate <span class="math inline">\(\hat{t}_{\mathrm{MRCA}} = \bar{t} -
+\bar{d}/\hat{\mu}\)</span> backward in time on small cohorts (<span
+class="math inline">\(N &lt; 50\)</span>).</p>
+<hr />
+<h2 id="the-chronaeon-timetree-chronaeon.timetree-algorithm">2. The
+ChronAeon TimeTree (<code>chronaeon.timetree</code>) Algorithm</h2>
+<p><code>chronaeon.timetree</code> resolves both limitations through a
+six-stage analytical pipeline implemented in <a
+href="../chronaeon/src/chronaeon/timetree.py"><code>chronaeon/src/chronaeon/timetree.py</code></a>.</p>
+<h3
+id="stage-1-time-decay-soft-profile-construction-the-centering-identity">Stage
+1: Time-Decay Soft-Profile Construction &amp; The Centering
+Identity</h3>
+<p>Given tip timestamps <span class="math inline">\(\mathbf{t} \in
+\mathbb{R}^N\)</span> with <span class="math inline">\(t_{\min} = \min_i
+t_i\)</span> and <span class="math inline">\(\bar{t} = \frac{1}{N}\sum_i
+t_i\)</span>, we define normalized exponential time-decay weights over a
+discrete candidate grid <span class="math inline">\(\gamma \in \{0,
+0.25, 0.5, 1, 2, 4, 7, 10\}\)</span>: <span
+class="math display">\[w_i(\gamma) = \frac{\exp\!\left(-\gamma \frac{t_i
+- t_{\min}}{\max(\bar{t} - t_{\min}, 10^{-5})}\right)}{\sum_{k=1}^N
+\exp\!\left(-\gamma \frac{t_k - t_{\min}}{\max(\bar{t} - t_{\min},
+10^{-5})}\right)}, \qquad Q_{\ell, b}(\gamma) = \sum_{i=1}^N
+w_i(\gamma)\, \mathbb{I}(s_{i,\ell} = b). \tag{2}\]</span> In sequence
+mode, <span class="math inline">\(d_{\mathrm{prof}, i}(\gamma) =
+D_{\mathrm{TN93}}(s_i, Q(\gamma))\)</span>; in distance/tree mode, we
+evaluate the exact quadratic distance-space dual: <span
+class="math display">\[d_{\mathrm{prof}, i}(\gamma) = \sum_{j=1}^N
+w_j(\gamma) D_{ij} - \frac{1}{2} \sum_{j=1}^N \sum_{k=1}^N w_j(\gamma)
+w_k(\gamma) D_{jk}. \tag{3}\]</span> Selecting <span
+class="math inline">\(\gamma^* = \arg\max_\gamma
+\mathrm{Corr}(\mathbf{t}, \mathbf{d}_{\mathrm{prof}}(\gamma))\)</span>
+yields the optimal soft profile. Crucially, subtracting the sample mean
+<span class="math inline">\(\bar{d}_{\mathrm{prof}} =
+\frac{1}{N}\sum_{i=1}^N d_{\mathrm{prof}, i}(\gamma^*)\)</span> forms
+the <strong>centered profile divergence vector</strong>: <span
+class="math display">\[\tilde{\mathbf{d}}_{\mathrm{prof}} =
+\mathbf{d}_{\mathrm{prof}}(\gamma^*) -
+\bar{d}_{\mathrm{prof}}\mathbf{1}, \tag{4}\]</span> which
+<strong>identically cancels</strong> the constant ancestral offset <span
+class="math inline">\(+D(R, Q(\gamma^*))\)</span> in Eq. (1) while
+preserving the relative root-to-tip evolutionary displacements across
+all taxa.</p>
+<h3
+id="stage-2-fast-rust-tn93-distance-manifold-vectorized-neighbor-joining">Stage
+2: Fast Rust TN93 Distance Manifold &amp; Vectorized
+Neighbor-Joining</h3>
+<ul>
+<li><strong>Tree-Free Mode
+(<code>chronaeon_timetree_seq</code>)</strong>: The native Rust kernel
+(<code>aeon_core._native.tn93_distance_matrix</code>) computes the <span
+class="math inline">\(N \times N\)</span> Tamura-Nei distance matrix
+<span class="math inline">\(\mathbf{D}\)</span> in parallel across
+sites. An unrooted binary tree <span class="math inline">\(T_u = (V, E,
+\mathbf{b})\)</span> with <span class="math inline">\(2N-2\)</span>
+nodes and <span class="math inline">\(2N-3\)</span> edges is
+reconstructed in <span class="math inline">\(O(N^3)\)</span> via
+vectorized Neighbor-Joining (<code>fast_nj</code>) using the <span
+class="math inline">\(Q\)</span>-criterion matrix: <span
+class="math display">\[Q_{uv} = (m - 2) D_{uv} - \sum_{k=1}^m D_{uk} -
+\sum_{k=1}^m D_{vk}, \qquad b_{uw} = \frac{1}{2} D_{uv} + \frac{r_u -
+r_v}{2(m-2)}. \tag{5}\]</span></li>
+<li><strong>Tree-Guided Mode
+(<code>chronaeon_timetree_tree</code>)</strong>: Parses an unrooted or
+rooted Newick tree directly into an adjacency representation and
+extracts the all-nodes-to-tips patristic distance matrix in <span
+class="math inline">\(O(N^2)\)</span>.</li>
+</ul>
+<h3
+id="stage-3-closed-form-soft-profile-guided-continuous-edge-rooting">Stage
+3: Closed-Form Soft-Profile-Guided Continuous Edge Rooting</h3>
+<p>For every candidate edge <span class="math inline">\(e = (u, v) \in
+E\)</span> of length <span class="math inline">\(b_e\)</span> and
+fractional split <span class="math inline">\(\alpha \in [0, 1]\)</span>
+(placing root <span class="math inline">\(R_{e,\alpha}\)</span> at
+distance <span class="math inline">\(\alpha b_e\)</span> from <span
+class="math inline">\(u\)</span> and <span
+class="math inline">\((1-\alpha)b_e\)</span> from <span
+class="math inline">\(v\)</span>), the induced root-to-tip patristic
+distance vector across tips <span class="math inline">\(i \in \{1,
+\dots, N\}\)</span> is linear in <span
+class="math inline">\(\alpha\)</span>: <span
+class="math display">\[\mathbf{d}(e, \alpha) = \mathbf{d}_0(e) + \alpha
+b_e \mathbf{s}_e, \qquad s_{e,i} = \begin{cases} +1 &amp; \text{if tip }
+i \text{ is in the } u\text{-subtree}, \\ -1 &amp; \text{if tip } i
+\text{ is in the } v\text{-subtree}. \end{cases} \tag{6}\]</span> Let
+<span class="math inline">\(\tilde{\mathbf{x}} = \mathbf{x} -
+\bar{x}\mathbf{1}\)</span> denote mean-centering and <span
+class="math inline">\(\mathbf{M}_t = \mathbf{I} -
+\frac{\tilde{\mathbf{t}}\tilde{\mathbf{t}}^\top}{\|\tilde{\mathbf{t}}\|_2^2}\)</span>
+denote the orthogonal projector onto <span
+class="math inline">\(\mathrm{span}(\mathbf{1},
+\mathbf{t})^\perp\)</span>. Both the temporal-regression residual
+minimizer <span
+class="math inline">\(\alpha_{\mathrm{rss}}^*(e)\)</span> and the
+centered soft-profile alignment minimizer <span
+class="math inline">\(\alpha_{\mathrm{prof}}^*(e)\)</span> admit exact
+closed-form solutions on <span class="math inline">\([0, 1]\)</span>:
+<span class="math display">\[\alpha_{\mathrm{rss}}^*(e) =
+\mathrm{clip}_{[0,1]}\!\left(-\frac{\langle \mathbf{M}_t
+\tilde{\mathbf{d}}_0(e),\, \mathbf{M}_t \tilde{\mathbf{s}}_e
+\rangle}{b_e \|\mathbf{M}_t \tilde{\mathbf{s}}_e\|_2^2}\right), \qquad
+\alpha_{\mathrm{prof}}^*(e) = \mathrm{clip}_{[0,1]}\!\left(\frac{\langle
+\tilde{\mathbf{d}}_{\mathrm{prof}} - \tilde{\mathbf{d}}_0(e),\,
+\tilde{\mathbf{s}}_e \rangle}{b_e \|\tilde{\mathbf{s}}_e\|_2^2}\right).
+\tag{7}\]</span> Evaluating the composite objective over all <span
+class="math inline">\(2N-3\)</span> edges subject to positive
+evolutionary rate <span class="math inline">\(\hat{\mu}(e, \alpha) =
+\langle \tilde{\mathbf{t}}, \tilde{\mathbf{d}}(e, \alpha)\rangle /
+\|\tilde{\mathbf{t}}\|_2^2 &gt; 0\)</span>: <span
+class="math display">\[\mathcal{J}(e, \alpha) =
+\big\|\tilde{\mathbf{d}}(e, \alpha) - \hat{\mu}(e,
+\alpha)\tilde{\mathbf{t}}\big\|_2^2 + \lambda_{\mathrm{prof}}
+\big\|\tilde{\mathbf{d}}(e, \alpha) -
+\tilde{\mathbf{d}}_{\mathrm{prof}}\big\|_2^2 \qquad
+(\lambda_{\mathrm{prof}} = 0.35) \tag{8}\]</span> selects the globally
+optimal root <span class="math inline">\((e^*, \alpha^*)\)</span> in
+<span class="math inline">\(O(N^2)\)</span> total operations.</p>
+<h3
+id="stage-4-rank-1-sherman-morrison-loocv-outlier-downweighting">Stage
+4: Rank-1 Sherman-Morrison LOOCV Outlier Downweighting</h3>
+<p>Before solving for internal node dates, high-leverage sequencing
+errors, recombinants, or passaged lab strains are screened in <span
+class="math inline">\(O(N)\)</span> using analytical leave-one-out
+cross-validation (LOOCV) without refitting: <span
+class="math display">\[h_{ii} = \frac{1}{N} + \frac{(t_i -
+\bar{t})^2}{\sum_{j=1}^N (t_j - \bar{t})^2}, \qquad
+\hat{\sigma}_{(-i)}^2 = \frac{1}{N-3}\left(\mathrm{RSS} - \frac{r_i^2}{1
+- h_{ii}}\right), \qquad Z_i = \frac{r_i}{\hat{\sigma}_{(-i)}\sqrt{1 -
+h_{ii}}}. \tag{9}\]</span> Taxa exceeding <span
+class="math inline">\(|Z_i| &gt; z_{\mathrm{thresh}}\)</span> (<span
+class="math inline">\(3.0\)</span> by default) receive Huber-type
+terminal branch weights <span class="math inline">\(u_i = \min\!\big(1,
+(z_{\mathrm{thresh}}/|Z_i|)^2\big)\)</span>.</p>
+<h3
+id="stage-5-active-set-contracted-tree-laplacian-isotonic-wls-solver">Stage
+5: Active-Set Contracted Tree-Laplacian Isotonic WLS Solver</h3>
+<p>Directed from <span class="math inline">\(R_{e^*,\alpha^*}\)</span>,
+the rooted topology has <span class="math inline">\(N\)</span> fixed
+terminal timestamps <span class="math inline">\(t_1, \dots, t_N\)</span>
+and <span class="math inline">\(N-1\)</span> unknown internal node
+timestamps <span class="math inline">\(\mathbf{t}_I \in
+\mathbb{R}^{N-1}\)</span>. Under a Poisson-regularized branch variance
+model, each directed edge <span class="math inline">\(e = (p \to
+v)\)</span> carries weight <span class="math inline">\(w_e =
+\frac{L_{\mathrm{eff}}}{b_e + c/L_{\mathrm{eff}}}\)</span> (<span
+class="math inline">\(c = 10\)</span>, scaled by <span
+class="math inline">\(u_v\)</span> on terminal edges). We minimize the
+root-anchored isotonic WLS objective: <span
+class="math display">\[\min_{\mathbf{t}_I \in \mathbb{R}^{N-1},\, \mu
+&gt; 0} \sum_{e=(p \to v) \in E} w_e \big(b_e - \mu (t_v - t_p)\big)^2 +
+w_{\mathrm{anchor}} \big(t_{\mathrm{root}} -
+t_{\mathrm{root}}^{\mathrm{rtt}}(\mu)\big)^2 \quad \text{subject to}
+\quad t_p \le t_v \;\;\forall (p \to v) \in E, \tag{10}\]</span> where
+<span class="math inline">\(t_{\mathrm{root}}^{\mathrm{rtt}}(\mu) =
+\bar{t} - \bar{d}_{\mathrm{root}}/\mu\)</span> is the centered
+root-to-tip intercept. 1. <strong>Active-Set Union-Find Contraction
+(<span class="math inline">\(O(N)\)</span> per iteration)</strong>: For
+fixed <span class="math inline">\(\mu\)</span>, any violated internal
+edge <span class="math inline">\((p \to c)\)</span> with <span
+class="math inline">\(t_p &gt; t_c\)</span> is added to the active
+constraint set <span class="math inline">\(\mathcal{A}_I\)</span> and
+contracted via Union-Find into a connected component <span
+class="math inline">\(C_k \in \mathcal{C}\)</span>, while any internal
+node exceeding a child tip (<span class="math inline">\(t_p &gt;
+t_{\mathrm{leaf}}\)</span>) pins its component to <span
+class="math inline">\(\min_{\mathrm{leaf} \in \partial C_k}
+t_{\mathrm{leaf}}\)</span>. The remaining free components satisfy a
+sparse, symmetric positive-definite <strong>contracted tree-Laplacian
+linear system</strong>: <span
+class="math display">\[\mathbf{L}_{\mathcal{C}} \mathbf{t}_{\mathcal{C}}
+= \mathbf{r}_{\mathcal{C}}(\mu), \tag{11}\]</span> which is solved in
+<span class="math inline">\(O(|\mathcal{C}|) \subseteq O(N)\)</span>
+time via sparse Cholesky/LU (<code>scipy.sparse.linalg.spsolve</code>).
+2. <strong>Blended Rate Update (Preventing Polytomy
+Attenuation)</strong>: When short internal branches have <span
+class="math inline">\(b_e = 0\)</span> but <span
+class="math inline">\(\tau_e = t_v - t_p &gt; 0\)</span>, pure
+branch-ratio WLS updates (<span class="math inline">\(\mu_{\mathrm{wls}}
+= \frac{\sum w_e b_e \tau_e}{\sum w_e \tau_e^2}\)</span>) are biased
+downward by zero-mutation denominators. <code>chronaeon.timetree</code>
+blends the path-wise root-to-tip rate <span
+class="math inline">\(\hat{\mu}_{\mathrm{rtt}}\)</span> with the
+branch-wise WLS/Poisson MLE rate <span
+class="math inline">\(\hat{\mu}_{\mathrm{branch}} =
+0.7\hat{\mu}_{\mathrm{wls}} + 0.3\frac{\sum b_e}{\sum \tau_e}\)</span>:
+<span class="math display">\[\hat{\mu}^{(k+1)} =
+\frac{1}{2}\hat{\mu}_{\mathrm{rtt}} +
+\frac{1}{2}\hat{\mu}_{\mathrm{branch}}^{(k)}, \tag{12}\]</span>
+guaranteeing immunity to internal polytomy rate collapse.</p>
+<h3
+id="stage-6-dispersion-calibrated-analytical-fieller-confidence-intervals">Stage
+6: Dispersion-Calibrated Analytical Fieller Confidence Intervals</h3>
+<p>To account for phylogenetic non-independence and
+relaxed/autocorrelated rate drift without bootstrap resampling,
+<code>chronaeon.timetree</code> computes: 1. <strong>Bartlett’s
+Effective Sample Size</strong>: <span
+class="math inline">\(N_{\mathrm{eff}} = \mathrm{clip}_{[3,
+N]}\!\left(\frac{N^2}{\sum_{i,j} \exp(-\kappa D_{ij})}\right)\)</span>
+with <span class="math inline">\(\kappa = 5 /
+\mathrm{median}(D_{ij})\)</span> and effective degrees of freedom <span
+class="math inline">\(\nu^* = \max(2, N_{\mathrm{eff}} - 2)\)</span>. 2.
+<strong>Path-to-Branch Overdispersion Ratio</strong>: Comparing
+path-level Poisson dispersion <span
+class="math inline">\(\hat{\phi}_{\mathrm{rtt}} = \frac{1}{N-2}\sum_i
+\frac{u_i L(d_i - \hat{\mu}(t_i - \hat{t}_{\mathrm{root}}))^2}{\max(1/L,
+\hat{\mu}(t_i - \hat{t}_{\mathrm{root}}))}\)</span> against branch-level
+WLS dispersion <span class="math inline">\(\hat{\phi}_{\mathrm{branch}}
+= \frac{1}{|E|-|V_I|}\sum_e w_e(b_e - \hat{\mu}\tau_e)^2\)</span> yields
+the autocorrelation inflation factor <span
+class="math inline">\(\rho_{\mathrm{disp}} = \sqrt{\max(1,
+\hat{\phi}_{\mathrm{rtt}} / \hat{\phi}_{\mathrm{branch}})}\)</span>. 3.
+<strong>Exact Non-Linear Fieller Bounds</strong>: Defining <span
+class="math inline">\(g = \left(\frac{t_{0.975, \nu^*}
+\mathrm{SE}_{\mathrm{eff}}(\hat{\mu})}{\hat{\mu}}\right)^2\)</span>,
+when <span class="math inline">\(g &lt; 1\)</span>, the 95% confidence
+interval for <span class="math inline">\(t_{\mathrm{MRCA}}\)</span> (and
+analogously for every internal node <span class="math inline">\(u \in
+V_I\)</span> relative to its descendant tips) is solved in closed form
+via Fieller’s quadratic root formula: <span
+class="math display">\[\mathrm{CI}_{95\%}(t_{\mathrm{MRCA}}) = \bar{t} -
+\frac{1}{1 - g}\left[\hat{\theta}_0 \mp \sqrt{\hat{\theta}_0^2 -
+(1-g)\!\left(\hat{\theta}_0^2 - \frac{t_{0.975,\nu^*}^2
+\mathrm{SE}^2(\hat{d}_0)}{\hat{\mu}^2}\right)}\right], \qquad
+\hat{\theta}_0 = \bar{t} - \hat{t}_{\mathrm{MRCA}}.
+\tag{13}\]</span></p>
+<hr />
+<h2
+id="how-coalescent-skyline-plots-differ-between-phylodate-timetrees-and-chronaeon.timetree">3.
+How Coalescent Skyline Plots Differ Between <code>phylodate</code>
+Timetrees and <code>chronaeon.timetree</code></h2>
+<p>Given a dated heterochronous phylogeny with <span
+class="math inline">\(N\)</span> tip sampling times <span
+class="math inline">\(s_1 \le \dots \le s_N\)</span> and <span
+class="math inline">\(N-1\)</span> internal coalescent times <span
+class="math inline">\(c_1 \le \dots \le c_{N-1}\)</span>, the sorted
+timeline of all <span class="math inline">\(2N-1\)</span> events
+partitions <span class="math inline">\([c_1, s_N]\)</span> into
+elementary intervals <span class="math inline">\(I_j = [t_{j-1},
+t_j]\)</span> of duration <span class="math inline">\(\Delta t_j = t_j -
+t_{j-1} \ge 0\)</span> with <span class="math inline">\(k_j\)</span>
+extant lineages. Under the heterochronous Kingman coalescent (Rodrigo
+&amp; Felsenstein 1999; Strimmer &amp; Pybus 2001), the generalized
+skyline estimator over a pooled window <span
+class="math inline">\(W_m\)</span> containing <span
+class="math inline">\(r_m \ge 1\)</span> coalescent events and spanning
+<span class="math inline">\(\sum_{j \in W_m} \Delta t_j \ge
+\epsilon\)</span> is: <span class="math display">\[\hat{N}_e(W_m) =
+\frac{1}{r_m} \sum_{j \in W_m} \binom{k_j}{2} \Delta t_j.
+\tag{14}\]</span></p>
+<p>Because <span class="math inline">\(\hat{N}_e(t)\)</span> is a linear
+functional of the <strong>inter-node waiting times <span
+class="math inline">\(\Delta t_j\)</span> weighted quadratically by the
+extant lineage count <span
+class="math inline">\(\binom{k_j}{2}\)</span></strong>, differences in
+how <code>chronaeon.timetree</code> and the <code>phylodate</code>
+methods estimate internal node dates manifest in four distinct ways on
+skyline and LTT plots:</p>
+<h3
+id="the-1-mutation-temporal-resolution-quantum-and-zero-wait-polytomy-collapse">3.1
+The 1-Mutation Temporal Resolution Quantum and Zero-Wait Polytomy
+Collapse</h3>
+<p>On an alignment of length <span class="math inline">\(L\)</span>
+evolving at substitution rate <span class="math inline">\(\mu\)</span>,
+a single mutation along a lineage corresponds to an expected waiting
+time of: <span class="math display">\[\Delta t_{\mathrm{quantum}} =
+\frac{1}{\mu L}. \tag{15}\]</span> During rapid epidemic transmission
+(where <span class="math inline">\(k_j\)</span> is large and true
+coalescent waiting times satisfy <span class="math inline">\(\Delta t_j
+\ll (\mu L)^{-1}\)</span>), most short internal branches accumulate zero
+mutations (<span class="math inline">\(b_e = 0\)</span>). Different
+dating algorithms handle this regime differently: - <strong>Hard
+Topological Collapsing (<code>lsd2</code>)</strong>: By default,
+<code>lsd2</code> collapses all internal branches with <span
+class="math inline">\(b_e \le 0.5/L\)</span>
+(<code>nullblen = 0.5/L</code>) into multifurcations and clamps active
+constraints <span class="math inline">\(t_p = t_v\)</span>. On empirical
+outbreaks, <code>lsd2</code> collapses <strong>85.1% of coalescent
+intervals on Ebola</strong>, <strong>51.9% on Chikungunya
+Brazil</strong>, and <strong>46.7% on Rabies</strong> to <span
+class="math inline">\(\Delta t_j = 0\)</span> (Figure 3B). In an
+ungrouped classic skyline (<span class="math inline">\(\epsilon \to
+0\)</span>), these zero-duration intervals produce artificial <span
+class="math inline">\(\hat{N}_e(t) \to 0\)</span> downward spikes; even
+with <span class="math inline">\(\epsilon\)</span>-pooling, if
+multifurcating nodes of out-degree <span class="math inline">\(d &gt;
+2\)</span> are not expanded with multiplicity <span
+class="math inline">\(d - 1\)</span>, the LTT curve <span
+class="math inline">\(L(t)\)</span> undercounts active lineages and
+biases <span class="math inline">\(\binom{k_j}{2}\)</span> upward by
+<span class="math inline">\(3\text{--}10\times\)</span>. -
+<strong>Active-Set Tree-Laplacian with Root-to-Tip Rate Blending
+(<code>chronaeon.timetree</code>)</strong>: Both
+<code>chronaeon_timetree_tree</code> and
+<code>chronaeon_timetree_seq</code> enforce exact monotonicity <span
+class="math inline">\(t_p \le t_v\)</span> via Union-Find active-set
+contraction while preserving the full binary topology (<span
+class="math inline">\(N-1\)</span> internal nodes) and preventing
+zero-length branches from attenuating <span
+class="math inline">\(\hat{\mu}\)</span>. Consequently,
+<code>chronaeon.timetree</code> exhibits substantially lower zero-wait
+discretization than <code>lsd2</code> (<strong>14.8%–18.5% on
+Chikungunya</strong>, <strong>24.4%–31.1% on Rabies</strong>, and
+<strong>68.6%–74.7% on ultra-low-diversity Ebola</strong>; Figure 3B). -
+<strong>Strict Positive Branch Regularization (<code>treedater</code>,
+<code>wlogdate</code>)</strong>: Because <code>treedater</code>
+(Gamma-Poisson branch prior) and <code>wlogdate</code> (<span
+class="math inline">\(\sum_e (\log f_e)^2\)</span> log-rate penalty)
+penalize <span class="math inline">\(\tau_e \to 0\)</span>, they produce
+virtually zero collapsed intervals (<code>0%–7.4%</code>; Figure 3B),
+yielding smoother raw skylines at the cost of occasionally
+over-stretching zero-mutation basal clades on low-signal datasets (e.g.,
+<code>wlogdate</code> on Ebola and Dengue; Table 2).</p>
+<h3
+id="basal-skyline-horizon-t-to-t_mathrmmrca-and-unrooted-ml-tree-vulnerability">3.2
+Basal Skyline Horizon (<span class="math inline">\(t \to
+t_{\mathrm{MRCA}}\)</span>) and Unrooted ML Tree Vulnerability</h3>
+<p>Near the root of the phylogeny (<span class="math inline">\(k_j \in
+\{2, 3, 4\}\)</span>), small errors in root placement or deep branch
+rates shift the basal coalescent intervals <span
+class="math inline">\([c_1, c_5]\)</span> across decades: -
+<strong><code>chronaeon.timetree</code> and <code>treetime</code> are
+Self-Rooting</strong>: Given an unrooted IQ-TREE phylogeny
+(<code>chronaeon_comparison/data/trees/*.nwk</code>) or raw sequences,
+<code>chronaeon.timetree</code> automatically locates <span
+class="math inline">\((e^*, \alpha^*)\)</span> via Eq. (8), aligning the
+basal skyline horizon with published BEAST Skygrid/Skyline posteriors
+(Figure 2). - <strong>Sensitivity of <code>lsd2</code>,
+<code>treedater</code>, <code>reltime</code>, and
+<code>wlogdate</code></strong>: On Dengue
+(<code>11_dengue_polyepoch_suchard2020</code>, <span
+class="math inline">\(N=352\)</span>), even after root alignment,
+<code>lsd2</code> and <code>wlogdate</code> stretch deep basal branches
+backward to <span class="math inline">\(1789.5\)</span> and <span
+class="math inline">\(1860.8\)</span> (vs. <span
+class="math inline">\(1931.0\text{--}1942.8\)</span> for
+<code>chronaeon.timetree</code> and <span
+class="math inline">\(1935.5\)</span> for <code>treetime</code>),
+inflating the pre-1950 ancestral skyline <span
+class="math inline">\(\hat{N}_e(t)\)</span> by <span
+class="math inline">\(3\text{--}4\times\)</span> (Table 2, Figure 2D).
+On Ebola (<code>00_ebola_sierraleone_gire2014</code>),
+<code>treedater</code> stretches the basal root back to <span
+class="math inline">\(2013.17\)</span> (vs. BEAST <span
+class="math inline">\(2014.20\)</span> and
+<code>chronaeon.timetree</code> <span
+class="math inline">\(2014.20\text{--}2014.26\)</span>), creating a
+spurious 1-year pre-epidemic tail in Figure 2B.</p>
+<h3
+id="tree-free-nj-clade-averaging-chronaeon_timetree_seq-vs.-ml-single-branch-variance-chronaeon_timetree_tree">3.3
+Tree-Free NJ Clade Averaging (<code>chronaeon_timetree_seq</code>)
+vs. ML Single-Branch Variance
+(<code>chronaeon_timetree_tree</code>)</h3>
+<p>A striking finding in both synthetic (Figure 1, Table 1) and
+empirical (Figure 2, Table 2) benchmarks is how closely the
+<strong>tree-free sequence pipeline</strong>
+(<code>chronaeon_timetree_seq</code>, using Rust TN93 +
+<code>fast_nj</code>) tracks the <strong>ML-tree pipeline</strong>
+(<code>chronaeon_timetree_tree</code>): - Because Neighbor-Joining
+branch lengths <span class="math inline">\(b_{uw} = \frac{1}{2}D_{uv} +
+\frac{r_u - r_v}{2(m-2)}\)</span> average pairwise TN93 distances across
+all <span class="math inline">\(m-2\)</span> outgroup lineages,
+intermediate internal branch lengths have low variance. - Near the tips,
+NJ resolves zero-mutation cherries deterministically, whereas near the
+root, Stage 3’s centered soft-profile penalty <span
+class="math inline">\(\lambda_{\mathrm{prof}}\|\tilde{\mathbf{d}}(e,\alpha)
+- \tilde{\mathbf{d}}_{\mathrm{prof}}\|_2^2\)</span> anchors the basal
+coalescent splits to the global temporal gradient.</p>
+<hr />
+<h2 id="quantitative-benchmark-synthetic-empirical-skyline-recovery">4.
+Quantitative Benchmark: Synthetic &amp; Empirical Skyline Recovery</h2>
+<h3 id="synthetic-heterochronous-coalescent-benchmark">4.1 Synthetic
+Heterochronous Coalescent Benchmark</h3>
+<p>We simulated <span class="math inline">\(N = 40\)</span> serially
+sampled sequences (<span class="math inline">\(L = 1,500\text{
+bp}\)</span>, <span class="math inline">\(\mu = 1.5 \times 10^{-3}\text{
+subs/site/yr}\)</span>, <span class="math inline">\(t_i \sim
+\mathcal{U}[2000, 2020]\)</span>) under three exact heterochronous
+Kingman coalescent demographic regimes across 8 replicates per regime:
+1. <strong>Constant Demography</strong>: <span
+class="math inline">\(N_e(t) = 15.0\text{ yr}\)</span>. 2.
+<strong>Exponential Epidemic Growth</strong>: <span
+class="math inline">\(N_e(t) = 2.0 \exp(0.14 \max(0, t -
+1995))\)</span>. 3. <strong>Epidemic Boom-Bust Wave</strong>: <span
+class="math inline">\(N_e(t) = 2.5 + 22.0 \exp\!\big(-\frac{1}{2}((t -
+2011)/3.2)^2\big)\)</span>.</p>
+<table style="width:100%;">
+<colgroup>
+<col style="width: 9%" />
+<col style="width: 9%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: left;">Demographic Scenario</th>
+<th style="text-align: left;">Method</th>
+<th style="text-align: center;">Skyline <span
+class="math inline">\(\log_{10}\hat{N}_e\)</span> MAE <span
+class="math inline">\(\downarrow\)</span></th>
+<th style="text-align: center;">Skyline <span
+class="math inline">\(\log_{10}\hat{N}_e\)</span> RMSE <span
+class="math inline">\(\downarrow\)</span></th>
+<th style="text-align: center;">Skyline <span
+class="math inline">\(\log_{10}\hat{N}_e\)</span> Bias</th>
+<th style="text-align: center;">LTT MAE (lineages) <span
+class="math inline">\(\downarrow\)</span></th>
+<th style="text-align: center;">Coalescent Quantile MAE (yr) <span
+class="math inline">\(\downarrow\)</span></th>
+<th style="text-align: center;"><span
+class="math inline">\(t_{\mathrm{MRCA}}\)</span> MAE (yr) <span
+class="math inline">\(\downarrow\)</span></th>
+<th style="text-align: center;">Zero-Wait Fraction (%)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;"><strong>Constant (<span
+class="math inline">\(N_e = 15\)</span>)</strong></td>
+<td
+style="text-align: left;"><strong><code>chronaeon_timetree_tree</code></strong></td>
+<td style="text-align: center;"><strong>0.241</strong></td>
+<td style="text-align: center;"><strong>0.307</strong></td>
+<td style="text-align: center;">-0.031</td>
+<td style="text-align: center;">0.569</td>
+<td style="text-align: center;">0.573</td>
+<td style="text-align: center;">4.41</td>
+<td style="text-align: center;">6.9%</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td
+style="text-align: left;"><strong><code>chronaeon_timetree_seq</code></strong></td>
+<td style="text-align: center;"><strong>0.275</strong></td>
+<td style="text-align: center;"><strong>0.369</strong></td>
+<td style="text-align: center;">-0.049</td>
+<td style="text-align: center;">0.563</td>
+<td style="text-align: center;">0.561</td>
+<td style="text-align: center;">4.11</td>
+<td style="text-align: center;">7.2%</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>wlogdate</code></td>
+<td style="text-align: center;">0.252</td>
+<td style="text-align: center;">0.315</td>
+<td style="text-align: center;">-0.011</td>
+<td style="text-align: center;"><strong>0.443</strong></td>
+<td style="text-align: center;"><strong>0.431</strong></td>
+<td style="text-align: center;"><strong>3.46</strong></td>
+<td style="text-align: center;">0.0%</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>node_dating</code></td>
+<td style="text-align: center;">0.260</td>
+<td style="text-align: center;">0.355</td>
+<td style="text-align: center;">-0.050</td>
+<td style="text-align: center;">0.604</td>
+<td style="text-align: center;">0.622</td>
+<td style="text-align: center;">5.09</td>
+<td style="text-align: center;">12.5%</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>treedater</code></td>
+<td style="text-align: center;">0.262</td>
+<td style="text-align: center;">0.322</td>
+<td style="text-align: center;">-0.021</td>
+<td style="text-align: center;">0.499</td>
+<td style="text-align: center;">0.512</td>
+<td style="text-align: center;">4.57</td>
+<td style="text-align: center;">0.0%</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>treetime</code></td>
+<td style="text-align: center;">0.266</td>
+<td style="text-align: center;">0.362</td>
+<td style="text-align: center;">-0.041</td>
+<td style="text-align: center;">0.541</td>
+<td style="text-align: center;">0.548</td>
+<td style="text-align: center;">4.37</td>
+<td style="text-align: center;">11.8%</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>reltime</code></td>
+<td style="text-align: center;">0.269</td>
+<td style="text-align: center;">0.363</td>
+<td style="text-align: center;">-0.068</td>
+<td style="text-align: center;">0.574</td>
+<td style="text-align: center;">0.588</td>
+<td style="text-align: center;">4.96</td>
+<td style="text-align: center;">13.2%</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>chronumental</code></td>
+<td style="text-align: center;">0.274</td>
+<td style="text-align: center;">0.374</td>
+<td style="text-align: center;">-0.068</td>
+<td style="text-align: center;">0.466</td>
+<td style="text-align: center;">0.450</td>
+<td style="text-align: center;">3.65</td>
+<td style="text-align: center;">7.9%</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>lsd2</code></td>
+<td style="text-align: center;">0.274</td>
+<td style="text-align: center;">0.367</td>
+<td style="text-align: center;">-0.037</td>
+<td style="text-align: center;">0.515</td>
+<td style="text-align: center;">0.525</td>
+<td style="text-align: center;">4.70</td>
+<td style="text-align: center;">15.8%</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Exponential Growth</strong></td>
+<td style="text-align: left;"><code>wlogdate</code></td>
+<td style="text-align: center;"><strong>0.238</strong></td>
+<td style="text-align: center;"><strong>0.301</strong></td>
+<td style="text-align: center;">+0.057</td>
+<td style="text-align: center;">0.531</td>
+<td style="text-align: center;">0.369</td>
+<td style="text-align: center;">0.94</td>
+<td style="text-align: center;">0.0%</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>reltime</code></td>
+<td style="text-align: center;">0.245</td>
+<td style="text-align: center;">0.313</td>
+<td style="text-align: center;">-0.003</td>
+<td style="text-align: center;">0.500</td>
+<td style="text-align: center;">0.338</td>
+<td style="text-align: center;">0.74</td>
+<td style="text-align: center;">16.8%</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td
+style="text-align: left;"><strong><code>chronaeon_timetree_tree</code></strong></td>
+<td style="text-align: center;"><strong>0.247</strong></td>
+<td style="text-align: center;"><strong>0.309</strong></td>
+<td style="text-align: center;">+0.034</td>
+<td style="text-align: center;"><strong>0.472</strong></td>
+<td style="text-align: center;"><strong>0.322</strong></td>
+<td style="text-align: center;"><strong>0.63</strong></td>
+<td style="text-align: center;">7.2%</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>chronumental</code></td>
+<td style="text-align: center;">0.247</td>
+<td style="text-align: center;">0.313</td>
+<td style="text-align: center;">+0.003</td>
+<td style="text-align: center;">0.494</td>
+<td style="text-align: center;">0.342</td>
+<td style="text-align: center;">0.76</td>
+<td style="text-align: center;">7.2%</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>treedater</code></td>
+<td style="text-align: center;">0.252</td>
+<td style="text-align: center;">0.315</td>
+<td style="text-align: center;">+0.055</td>
+<td style="text-align: center;">0.552</td>
+<td style="text-align: center;">0.379</td>
+<td style="text-align: center;">0.87</td>
+<td style="text-align: center;">0.0%</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>node_dating</code></td>
+<td style="text-align: center;">0.254</td>
+<td style="text-align: center;">0.318</td>
+<td style="text-align: center;">+0.039</td>
+<td style="text-align: center;">0.590</td>
+<td style="text-align: center;">0.406</td>
+<td style="text-align: center;">0.88</td>
+<td style="text-align: center;">15.1%</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td
+style="text-align: left;"><strong><code>chronaeon_timetree_seq</code></strong></td>
+<td style="text-align: center;"><strong>0.256</strong></td>
+<td style="text-align: center;"><strong>0.315</strong></td>
+<td style="text-align: center;">+0.038</td>
+<td style="text-align: center;">0.556</td>
+<td style="text-align: center;">0.370</td>
+<td style="text-align: center;">1.09</td>
+<td style="text-align: center;">11.8%</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>treetime</code></td>
+<td style="text-align: center;">0.257</td>
+<td style="text-align: center;">0.317</td>
+<td style="text-align: center;">+0.041</td>
+<td style="text-align: center;">0.565</td>
+<td style="text-align: center;">0.381</td>
+<td style="text-align: center;">1.01</td>
+<td style="text-align: center;">14.5%</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>lsd2</code></td>
+<td style="text-align: center;">0.258</td>
+<td style="text-align: center;">0.323</td>
+<td style="text-align: center;">+0.044</td>
+<td style="text-align: center;">0.521</td>
+<td style="text-align: center;">0.361</td>
+<td style="text-align: center;">0.67</td>
+<td style="text-align: center;">19.4%</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Epidemic Boom-Bust</strong></td>
+<td style="text-align: left;"><code>wlogdate</code></td>
+<td style="text-align: center;"><strong>0.230</strong></td>
+<td style="text-align: center;"><strong>0.293</strong></td>
+<td style="text-align: center;">+0.028</td>
+<td style="text-align: center;"><strong>0.366</strong></td>
+<td style="text-align: center;"><strong>0.257</strong></td>
+<td style="text-align: center;">0.50</td>
+<td style="text-align: center;">0.0%</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>treedater</code></td>
+<td style="text-align: center;">0.241</td>
+<td style="text-align: center;">0.298</td>
+<td style="text-align: center;">+0.020</td>
+<td style="text-align: center;">0.396</td>
+<td style="text-align: center;">0.277</td>
+<td style="text-align: center;">0.42</td>
+<td style="text-align: center;">0.0%</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td
+style="text-align: left;"><strong><code>chronaeon_timetree_seq</code></strong></td>
+<td style="text-align: center;"><strong>0.248</strong></td>
+<td style="text-align: center;"><strong>0.322</strong></td>
+<td style="text-align: center;">-0.016</td>
+<td style="text-align: center;">0.429</td>
+<td style="text-align: center;">0.297</td>
+<td style="text-align: center;">0.37</td>
+<td style="text-align: center;">12.2%</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td
+style="text-align: left;"><strong><code>chronaeon_timetree_tree</code></strong></td>
+<td style="text-align: center;"><strong>0.251</strong></td>
+<td style="text-align: center;"><strong>0.324</strong></td>
+<td style="text-align: center;">-0.019</td>
+<td style="text-align: center;">0.415</td>
+<td style="text-align: center;">0.286</td>
+<td style="text-align: center;"><strong>0.36</strong></td>
+<td style="text-align: center;">10.9%</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>chronumental</code></td>
+<td style="text-align: center;">0.255</td>
+<td style="text-align: center;">0.342</td>
+<td style="text-align: center;">-0.048</td>
+<td style="text-align: center;">0.398</td>
+<td style="text-align: center;">0.280</td>
+<td style="text-align: center;">0.41</td>
+<td style="text-align: center;">9.9%</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>node_dating</code></td>
+<td style="text-align: center;">0.260</td>
+<td style="text-align: center;">0.347</td>
+<td style="text-align: center;">+0.019</td>
+<td style="text-align: center;">0.443</td>
+<td style="text-align: center;">0.309</td>
+<td style="text-align: center;">0.65</td>
+<td style="text-align: center;">19.4%</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>reltime</code></td>
+<td style="text-align: center;">0.266</td>
+<td style="text-align: center;">0.348</td>
+<td style="text-align: center;">-0.037</td>
+<td style="text-align: center;">0.435</td>
+<td style="text-align: center;">0.308</td>
+<td style="text-align: center;">0.36</td>
+<td style="text-align: center;">22.4%</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>lsd2</code></td>
+<td style="text-align: center;">0.266</td>
+<td style="text-align: center;">0.339</td>
+<td style="text-align: center;">+0.011</td>
+<td style="text-align: center;">0.443</td>
+<td style="text-align: center;">0.312</td>
+<td style="text-align: center;">0.37</td>
+<td style="text-align: center;">25.0%</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>treetime</code></td>
+<td style="text-align: center;">0.269</td>
+<td style="text-align: center;">0.362</td>
+<td style="text-align: center;">-0.026</td>
+<td style="text-align: center;">0.415</td>
+<td style="text-align: center;">0.290</td>
+<td style="text-align: center;">0.59</td>
+<td style="text-align: center;">18.1%</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Table 1:</strong> Synthetic heterochronous coalescent skyline
+and LTT recovery across three demographic scenarios. On ML topologies,
+<code>chronaeon_timetree_tree</code> achieves the <strong>lowest overall
+skyline <span class="math inline">\(\log_{10}\hat{N}_e\)</span> MAE
+under Constant demography (<span
+class="math inline">\(0.241\)</span>)</strong>, the <strong>lowest LTT
+MAE (<span class="math inline">\(0.472\)</span>), coalescent quantile
+MAE (<span class="math inline">\(0.322\text{ yr}\)</span>), and <span
+class="math inline">\(t_{\mathrm{MRCA}}\)</span> MAE (<span
+class="math inline">\(0.63\text{ yr}\)</span>) under Exponential
+Growth</strong>, and the <strong>lowest <span
+class="math inline">\(t_{\mathrm{MRCA}}\)</span> MAE (<span
+class="math inline">\(0.36\text{ yr}\)</span>) under Boom-Bust</strong>.
+Directly from sequences without ML tree inference,
+<code>chronaeon_timetree_seq</code> matches or outperforms
+<code>lsd2</code> and <code>treetime</code> on Boom-Bust (<span
+class="math inline">\(0.248\)</span> vs. <span
+class="math inline">\(0.266\text{--}0.269\)</span>) and Exponential
+Growth (<span class="math inline">\(0.256\)</span> vs. <span
+class="math inline">\(0.257\text{--}0.258\)</span>).</p>
+<p><img src="figures/fig_whitepaper_synthetic_skyline.png"
+alt="Synthetic Skyline and LTT Comparison" /> <em>Figure 1: Median
+reconstructed generalized coalescent skylines <span
+class="math inline">\(\hat{N}_e(t)\)</span> (top row, log scale) and
+Lineages-Through-Time <span class="math inline">\(L(t)\)</span> curves
+(bottom row) across 8 replicates for Constant, Exponential Growth, and
+Epidemic Boom-Bust demographies compared against ground truth (black
+dashed).</em></p>
+<hr />
+<h3 id="empirical-viral-outbreak-skyline-comparison">4.2 Empirical Viral
+Outbreak Skyline Comparison</h3>
+<p>Table 2 and Figure 2 compare empirical skyline trajectories across
+four canonical viral phylodynamic cohorts: <strong>North American
+Rabies</strong> (<code>16_rabies_northamerica_biek2007</code>, <span
+class="math inline">\(N=46\)</span>), <strong>Ebola Sierra
+Leone</strong> (<code>00_ebola_sierraleone_gire2014</code>, <span
+class="math inline">\(N=195\)</span>), <strong>Chikungunya
+Brazil</strong> (<code>03_chikungunya_brazil_naveca2019</code>, <span
+class="math inline">\(N=29\)</span>), and <strong>Dengue
+Polyepoch</strong> (<code>11_dengue_polyepoch_suchard2020</code>, <span
+class="math inline">\(N=352\)</span>).</p>
+<table style="width:100%;">
+<colgroup>
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: left;">Viral Outbreak Cohort</th>
+<th style="text-align: left;">Method</th>
+<th style="text-align: center;">Inferred <span
+class="math inline">\(t_{\mathrm{MRCA}}\)</span></th>
+<th style="text-align: center;">BEAST Ref <span
+class="math inline">\(t_{\mathrm{MRCA}}\)</span></th>
+<th style="text-align: center;">Median Skyline <span
+class="math inline">\(\hat{N}_e \cdot g\)</span> (yr)</th>
+<th style="text-align: center;">Skyline Dynamic Range (<span
+class="math inline">\(\mathrm{IQR}(\log_{10}\hat{N}_e)\)</span>)</th>
+<th style="text-align: center;">Collapsed Zero-Wait Intervals (%)</th>
+<th style="text-align: center;">Requires External ML Tree?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;"><strong>Rabies North America</strong>
+(<span class="math inline">\(N=46\)</span>)</td>
+<td
+style="text-align: left;"><strong><code>chronaeon_timetree_seq</code></strong></td>
+<td style="text-align: center;"><strong>1972.85</strong></td>
+<td style="text-align: center;">1972.40</td>
+<td style="text-align: center;">335.8</td>
+<td style="text-align: center;">1.34</td>
+<td style="text-align: center;">24.4%</td>
+<td style="text-align: center;"><strong>No (42 ms total)</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td
+style="text-align: left;"><strong><code>chronaeon_timetree_tree</code></strong></td>
+<td style="text-align: center;"><strong>1971.24</strong></td>
+<td style="text-align: center;">1972.40</td>
+<td style="text-align: center;">291.1</td>
+<td style="text-align: center;">1.44</td>
+<td style="text-align: center;">31.1%</td>
+<td style="text-align: center;">Yes (+18.9 s IQ-TREE)</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>lsd2</code></td>
+<td style="text-align: center;">1971.21</td>
+<td style="text-align: center;">1972.40</td>
+<td style="text-align: center;">337.0</td>
+<td style="text-align: center;">1.26</td>
+<td style="text-align: center;">46.7%</td>
+<td style="text-align: center;">Yes (+18.9 s IQ-TREE)</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>treetime</code></td>
+<td style="text-align: center;">1970.64</td>
+<td style="text-align: center;">1972.40</td>
+<td style="text-align: center;">225.6</td>
+<td style="text-align: center;">1.55</td>
+<td style="text-align: center;">28.9%</td>
+<td style="text-align: center;">Yes (+18.9 s IQ-TREE)</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>treedater</code></td>
+<td style="text-align: center;">1975.80</td>
+<td style="text-align: center;">1972.40</td>
+<td style="text-align: center;">241.2</td>
+<td style="text-align: center;">1.51</td>
+<td style="text-align: center;">0.0%</td>
+<td style="text-align: center;">Yes (+18.9 s IQ-TREE)</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>wlogdate</code></td>
+<td style="text-align: center;">1972.28</td>
+<td style="text-align: center;">1972.40</td>
+<td style="text-align: center;">197.8</td>
+<td style="text-align: center;">1.72</td>
+<td style="text-align: center;">4.4%</td>
+<td style="text-align: center;">Yes (+18.9 s IQ-TREE)</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Ebola Sierra Leone</strong> (<span
+class="math inline">\(N=195\)</span>)</td>
+<td
+style="text-align: left;"><strong><code>chronaeon_timetree_seq</code></strong></td>
+<td style="text-align: center;"><strong>2014.26</strong></td>
+<td style="text-align: center;">2014.20</td>
+<td style="text-align: center;">2.22</td>
+<td style="text-align: center;">1.57</td>
+<td style="text-align: center;">74.7%</td>
+<td style="text-align: center;"><strong>No (918 ms total)</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td
+style="text-align: left;"><strong><code>chronaeon_timetree_tree</code></strong></td>
+<td style="text-align: center;"><strong>2014.20</strong></td>
+<td style="text-align: center;">2014.20</td>
+<td style="text-align: center;">1.39</td>
+<td style="text-align: center;">1.29</td>
+<td style="text-align: center;">68.6%</td>
+<td style="text-align: center;">Yes (+61.4 s IQ-TREE)</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>lsd2</code></td>
+<td style="text-align: center;">2014.07</td>
+<td style="text-align: center;">2014.20</td>
+<td style="text-align: center;">1.25</td>
+<td style="text-align: center;">1.96</td>
+<td style="text-align: center;">85.1%</td>
+<td style="text-align: center;">Yes (+61.4 s IQ-TREE)</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>treetime</code></td>
+<td style="text-align: center;">2013.81</td>
+<td style="text-align: center;">2014.20</td>
+<td style="text-align: center;">3.06</td>
+<td style="text-align: center;">0.61</td>
+<td style="text-align: center;">26.8%</td>
+<td style="text-align: center;">Yes (+61.4 s IQ-TREE)</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>treedater</code></td>
+<td style="text-align: center;">2013.17</td>
+<td style="text-align: center;">2014.20</td>
+<td style="text-align: center;">3.30</td>
+<td style="text-align: center;">1.79</td>
+<td style="text-align: center;">0.0%</td>
+<td style="text-align: center;">Yes (+61.4 s IQ-TREE)</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>wlogdate</code></td>
+<td style="text-align: center;">1977.61</td>
+<td style="text-align: center;">2014.20</td>
+<td style="text-align: center;">213.0</td>
+<td style="text-align: center;">1.25</td>
+<td style="text-align: center;">0.0%</td>
+<td style="text-align: center;">Yes (+61.4 s IQ-TREE)</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Chikungunya Brazil</strong> (<span
+class="math inline">\(N=29\)</span>)</td>
+<td
+style="text-align: left;"><strong><code>chronaeon_timetree_seq</code></strong></td>
+<td style="text-align: center;"><strong>2014.47</strong></td>
+<td style="text-align: center;">2014.54</td>
+<td style="text-align: center;">2.31</td>
+<td style="text-align: center;">0.51</td>
+<td style="text-align: center;">14.8%</td>
+<td style="text-align: center;"><strong>No (69 ms total)</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td
+style="text-align: left;"><strong><code>chronaeon_timetree_tree</code></strong></td>
+<td style="text-align: center;"><strong>2014.31</strong></td>
+<td style="text-align: center;">2014.54</td>
+<td style="text-align: center;">2.39</td>
+<td style="text-align: center;">0.62</td>
+<td style="text-align: center;">18.5%</td>
+<td style="text-align: center;">Yes (+11.2 s IQ-TREE)</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>lsd2</code></td>
+<td style="text-align: center;">2014.34</td>
+<td style="text-align: center;">2014.54</td>
+<td style="text-align: center;">2.27</td>
+<td style="text-align: center;">0.66</td>
+<td style="text-align: center;">51.9%</td>
+<td style="text-align: center;">Yes (+11.2 s IQ-TREE)</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>treetime</code></td>
+<td style="text-align: center;">2014.25</td>
+<td style="text-align: center;">2014.54</td>
+<td style="text-align: center;">2.53</td>
+<td style="text-align: center;">0.66</td>
+<td style="text-align: center;">33.3%</td>
+<td style="text-align: center;">Yes (+11.2 s IQ-TREE)</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>treedater</code></td>
+<td style="text-align: center;">2014.43</td>
+<td style="text-align: center;">2014.54</td>
+<td style="text-align: center;">1.95</td>
+<td style="text-align: center;">0.66</td>
+<td style="text-align: center;">0.0%</td>
+<td style="text-align: center;">Yes (+11.2 s IQ-TREE)</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>wlogdate</code></td>
+<td style="text-align: center;">2014.24</td>
+<td style="text-align: center;">2014.54</td>
+<td style="text-align: center;">3.14</td>
+<td style="text-align: center;">0.60</td>
+<td style="text-align: center;">7.4%</td>
+<td style="text-align: center;">Yes (+11.2 s IQ-TREE)</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Dengue Polyepoch</strong> (<span
+class="math inline">\(N=352\)</span>)</td>
+<td
+style="text-align: left;"><strong><code>chronaeon_timetree_seq</code></strong></td>
+<td style="text-align: center;"><strong>1942.77</strong></td>
+<td style="text-align: center;">1939.20</td>
+<td style="text-align: center;">25.57</td>
+<td style="text-align: center;">0.42</td>
+<td style="text-align: center;">33.7%</td>
+<td style="text-align: center;"><strong>No (1.74 s total)</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td
+style="text-align: left;"><strong><code>chronaeon_timetree_tree</code></strong></td>
+<td style="text-align: center;"><strong>1931.03</strong></td>
+<td style="text-align: center;">1939.20</td>
+<td style="text-align: center;">28.30</td>
+<td style="text-align: center;">0.15</td>
+<td style="text-align: center;">32.9%</td>
+<td style="text-align: center;">Yes (+42.8 s IQ-TREE)</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>treetime</code></td>
+<td style="text-align: center;">1935.50</td>
+<td style="text-align: center;">1939.20</td>
+<td style="text-align: center;">26.94</td>
+<td style="text-align: center;">0.24</td>
+<td style="text-align: center;">22.6%</td>
+<td style="text-align: center;">Yes (+42.8 s IQ-TREE)</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>reltime</code></td>
+<td style="text-align: center;">1936.23</td>
+<td style="text-align: center;">1939.20</td>
+<td style="text-align: center;">26.85</td>
+<td style="text-align: center;">0.23</td>
+<td style="text-align: center;">3.7%</td>
+<td style="text-align: center;">Yes (+42.8 s IQ-TREE)</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>treedater</code></td>
+<td style="text-align: center;">1915.12</td>
+<td style="text-align: center;">1939.20</td>
+<td style="text-align: center;">40.60</td>
+<td style="text-align: center;">0.23</td>
+<td style="text-align: center;">0.0%</td>
+<td style="text-align: center;">Yes (+42.8 s IQ-TREE)</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><code>lsd2</code></td>
+<td style="text-align: center;">1789.46</td>
+<td style="text-align: center;">1939.20</td>
+<td style="text-align: center;">115.88</td>
+<td style="text-align: center;">0.37</td>
+<td style="text-align: center;">42.9%</td>
+<td style="text-align: center;">Yes (+42.8 s IQ-TREE)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Table 2:</strong> Empirical viral skyline comparison across
+four BEAST benchmark cohorts. <code>chronaeon_timetree_seq</code> and
+<code>chronaeon_timetree_tree</code> closely match <code>treetime</code>
+and BEAST reference horizons across all four studies while avoiding the
+basal skyline inflation seen in <code>lsd2</code>/<code>wlogdate</code>
+on Dengue and <code>treedater</code>/<code>wlogdate</code> on Ebola.</p>
+<p><img src="figures/fig_whitepaper_empirical_skyline.png"
+alt="Empirical Viral Outbreak Skylines" /> <em>Figure 2: Empirical
+generalized coalescent skyline trajectories <span
+class="math inline">\(\hat{N}_e(t) \cdot g\)</span> across four viral
+outbreaks: (top-left) North American Rabies expansion (1971–2005),
+(top-right) 2014 Ebola Sierra Leone exponential wave, (bottom-left)
+2014–2017 Chikungunya Brazil seasonal double-peak epidemic, and
+(bottom-right) 1931–2010 Dengue multi-decade oscillations.</em></p>
+<p><img src="figures/fig_whitepaper_diagnostics.png"
+alt="Diagnostic Comparison of Skyline Error, Zero-Wait Discretization, and Coalescent Quantiles" />
+<em>Figure 3: (A) Mean demographic skyline <span
+class="math inline">\(\log_{10}\hat{N}_e(t)\)</span> MAE across
+synthetic scenarios; (B) Percentage of coalescent intervals collapsed to
+zero waiting time (<span class="math inline">\(\Delta t_j \le (\mu
+L)^{-1}\)</span>) across empirical viral cohorts; (C) Trade-off between
+internal coalescent quantile MAE and demographic skyline error.</em></p>
+<hr />
+<h2 id="summary-of-practical-guidelines">5. Summary of Practical
+Guidelines</h2>
+<ol type="1">
+<li><strong>When to use <code>chronaeon_timetree_seq</code> (Tree-Free
+Sequence Mode)</strong>: Ideal for rapid real-time genomic surveillance,
+BEAST warm-starting, and large alignments where running IQ-TREE/RAxML
+(<span class="math inline">\(10\text{--}180\text{ s}\)</span>) is
+prohibitive. It recovers both the dated phylogeny and the demographic
+skyline <span class="math inline">\(\hat{N}_e(t)\)</span> in <span
+class="math inline">\(40\text{ ms}\text{--}1.7\text{ s}\)</span> with
+accuracy matching ML-tree-based <code>treetime</code> and
+<code>lsd2</code>.</li>
+<li><strong>When to use <code>chronaeon_timetree_tree</code> (ML-Tree
+Mode)</strong>: When a high-quality ML topology is already available,
+<code>chronaeon_timetree_tree</code> provides automatic
+soft-profile-guided rooting, exact <span
+class="math inline">\(O(N)\)</span> active-set tree-Laplacian node
+dating in <span class="math inline">\(5\text{--}110\text{ ms}\)</span>,
+immunity to basal polytomy rate collapse, and well-calibrated 95%
+Fieller confidence intervals (87%–100% coverage across strict,
+uncorrelated, and autocorrelated clocks).</li>
+<li><strong>Constructing Skyline Plots from Point-Estimate
+TimeTrees</strong>: Because any active-set WLS solver
+(<code>lsd2</code>, <code>treetime</code>,
+<code>chronaeon.timetree</code>) discretizes waiting times shorter than
+the single-mutation quantum <span class="math inline">\(\Delta
+t_{\mathrm{quantum}} = (\mu L)^{-1}\)</span> into zero-length
+multifurcations, downstream skyline estimators should always pool
+elementary coalescent intervals using a minimum window threshold <span
+class="math inline">\(\epsilon \ge (\hat{\mu} L)^{-1}\)</span> (Strimmer
+&amp; Pybus generalized skyline or uniform Skygrid bins).</li>
+</ol>
+</body>
+</html>

@@ -9,3 +9,4 @@ aeon-core/src/*.egg-info/
 rust/target/
 .pytest_cache/
 chronaeon_pitch.pdf
+*.so
