@@ -48,6 +48,8 @@ from .alignment import (
 )
 from .timetree import (
     ChronAeonTimeTree,
+    SkylineResult,
+    compute_skyline,
     date_timetree,
     fast_nj,
 )
@@ -72,5 +74,5 @@ __all__ = [
     "ChronAeonSieve",
     "CanonicalMinHashSketcher", "AlignmentFreeBinner", "AlignmentFreeCentrifuge",
     "ReferenceCodonAligner", "ReferenceGuidedCodonThreader",
-    "ChronAeonTimeTree", "date_timetree", "fast_nj",
+    "ChronAeonTimeTree", "SkylineResult", "compute_skyline", "date_timetree", "fast_nj",
 ]

@@ -559,6 +559,8 @@ def run_all():
         true_ne_grid = np.array([ne_fn(t) for t in grid_t], dtype=np.float64)
 
         agg_ne = {m: [] for m in methods_to_compare}
+        agg_ne_lo = {"chronaeon_timetree_seq": [], "chronaeon_timetree_tree": []}
+        agg_ne_hi = {"chronaeon_timetree_seq": [], "chronaeon_timetree_tree": []}
         agg_ltt = {m: [] for m in methods_to_compare}
         true_ltt_list = []
 
@@ -578,9 +580,9 @@ def run_all():
             for m in methods_to_compare:
                 try:
                     if m == "chronaeon_timetree_seq":
-                        res = date_timetree(seq_dict, tip_dates, seq_length=seq_len, ci=False)
+                        res = date_timetree(seq_dict, tip_dates, seq_length=seq_len, ci=True)
                     elif m == "chronaeon_timetree_tree":
-                        res = date_timetree(sub_nwk, tip_dates, seq_length=seq_len, ci=False)
+                        res = date_timetree(sub_nwk, tip_dates, seq_length=seq_len, ci=True)
                     elif m == "wlogdate":
                         res = phylodate.date(sub_nwk, tip_dates, method=m, seq_length=seq_len, nrep=2)
                     else:
@@ -599,6 +601,20 @@ def run_all():
                     else:
                         log10_mae, log10_rmse, log10_bias = np.nan, np.nan, np.nan
 
+                    ci_cov = np.nan
+                    if m in ("chronaeon_timetree_seq", "chronaeon_timetree_tree"):
+                        ca_sky = res.skyline(epsilon=0.6, grid_times=grid_t, ci=True)
+                        agg_ne_lo[m].append(ca_sky.grid_ne_lo)
+                        agg_ne_hi[m].append(ca_sky.grid_ne_hi)
+                        valid_ci = valid & (~np.isnan(ca_sky.grid_ne_lo)) & (~np.isnan(ca_sky.grid_ne_hi))
+                        if np.sum(valid_ci) >= 5:
+                            ci_cov = float(
+                                np.mean(
+                                    (true_ne_grid[valid_ci] >= ca_sky.grid_ne_lo[valid_ci])
+                                    & (true_ne_grid[valid_ci] <= ca_sky.grid_ne_hi[valid_ci])
+                                )
+                            )
+
                     # LTT L1 integrated error
                     ltt_mae = float(np.mean(np.abs(sky["grid_ltt"] - true_sky["grid_ltt"])))
 
@@ -615,6 +631,7 @@ def run_all():
                         "skyline_log10_mae": log10_mae,
                         "skyline_log10_rmse": log10_rmse,
                         "skyline_log10_bias": log10_bias,
+                        "skyline_ci_cov": ci_cov,
                         "ltt_mae": ltt_mae,
                         "coal_times_mae": coal_mae,
                         "tmrca_err": tmrca_err,
@@ -632,6 +649,8 @@ def run_all():
             "true_ne": true_ne_grid,
             "true_ltt": np.nanmedian(np.vstack(true_ltt_list), axis=0),
             "agg_ne": {m: np.nanmedian(np.vstack(v), axis=0) for m, v in agg_ne.items() if v},
+            "agg_ne_lo": {m: np.nanmedian(np.vstack(v), axis=0) for m, v in agg_ne_lo.items() if v},
+            "agg_ne_hi": {m: np.nanmedian(np.vstack(v), axis=0) for m, v in agg_ne_hi.items() if v},
             "agg_ltt": {m: np.nanmedian(np.vstack(v), axis=0) for m, v in agg_ltt.items() if v},
         }
 
@@ -644,6 +663,7 @@ def run_all():
             skyline_log10_mae=("skyline_log10_mae", "mean"),
             skyline_log10_rmse=("skyline_log10_rmse", "mean"),
             skyline_log10_bias=("skyline_log10_bias", "mean"),
+            skyline_ci_cov=("skyline_ci_cov", "mean"),
             ltt_mae=("ltt_mae", "mean"),
             coal_times_mae=("coal_times_mae", "mean"),
             tmrca_mae=("tmrca_err", lambda s: float(np.mean(np.abs(s)))),
@@ -697,20 +717,27 @@ def run_all():
         for m in emp_methods:
             try:
                 if m == "chronaeon_timetree_seq":
-                    res = date_timetree(seq_dict, tip_dates, seq_length=seq_len_emp, ci=False)
+                    res = date_timetree(seq_dict, tip_dates, seq_length=seq_len_emp, ci=True)
                 elif m == "chronaeon_timetree_tree":
-                    res = date_timetree(iqtree_nwk, tip_dates, seq_length=seq_len_emp, ci=False)
+                    res = date_timetree(iqtree_nwk, tip_dates, seq_length=seq_len_emp, ci=True)
                 elif m == "wlogdate":
-                    res = phylodate.date(rooted_iqtree_nwk, tip_dates, method=m, seq_length=seq_len_emp, nrep=2)
+                    res = phylodate.date(rooted_iqtree_nwk, tip_dates, method=m, seq_length=seq_len_emp, nrep=1)
                 else:
                     res = phylodate.date(rooted_iqtree_nwk, tip_dates, method=m, seq_length=seq_len_emp)
 
                 c_times, s_times, zero_branch_frac = extract_method_coal_and_sample_times(m, res, tip_dates)
                 grid_emp = np.linspace(float(c_times[0]), float(t_max), 120)
                 sky = compute_ltt_and_skyline(c_times, s_times, epsilon=eps_val, grid_times=grid_emp)
+                ne_lo_emp, ne_hi_emp = None, None
+                if m in ("chronaeon_timetree_seq", "chronaeon_timetree_tree"):
+                    ca_emp_sky = res.skyline(epsilon=eps_val, grid_times=grid_emp, ci=True)
+                    ne_lo_emp = ca_emp_sky.grid_ne_lo
+                    ne_hi_emp = ca_emp_sky.grid_ne_hi
                 emp_curves[study_id]["methods"][m] = {
                     "grid_t": grid_emp,
                     "grid_ne": sky["grid_ne"],
+                    "grid_ne_lo": ne_lo_emp,
+                    "grid_ne_hi": ne_hi_emp,
                     "ltt_t": sky["ltt_t"],
                     "ltt_k": sky["ltt_k"],
                     "tmrca": float(c_times[0]),
@@ -780,6 +807,18 @@ def run_all():
         ax_ne.plot(gt, rc["true_ne"], color="black", lw=2.6, ls="--", label="Ground Truth $N_e(t)$", zorder=10)
         ax_ltt.plot(gt, rc["true_ltt"], color="black", lw=2.6, ls="--", label="Ground Truth LTT", zorder=10)
 
+        for m in ["chronaeon_timetree_tree", "chronaeon_timetree_seq"]:
+            if m in rc.get("agg_ne_lo", {}) and m in rc.get("agg_ne_hi", {}):
+                lbl_ci = "ChronAeon 95% CI (ML Tree)" if m == "chronaeon_timetree_tree" else "ChronAeon 95% CI (Seq)"
+                ax_ne.fill_between(
+                    gt,
+                    rc["agg_ne_lo"][m],
+                    rc["agg_ne_hi"][m],
+                    color=palette[m],
+                    alpha=0.14,
+                    label=lbl_ci,
+                )
+
         for m in plot_methods:
             if m in rc["agg_ne"]:
                 lw = 2.2 if m.startswith("chronaeon") else 1.4
@@ -810,6 +849,18 @@ def run_all():
         if study_id not in emp_curves:
             continue
         m_dict = emp_curves[study_id]["methods"]
+        for m in ["chronaeon_timetree_tree", "chronaeon_timetree_seq"]:
+            if m in m_dict and m_dict[m].get("grid_ne_lo") is not None:
+                d_ci = m_dict[m]
+                lbl_ci = "ChronAeon 95% CI (ML Tree)" if m == "chronaeon_timetree_tree" else "ChronAeon 95% CI (Seq)"
+                ax.fill_between(
+                    d_ci["grid_t"],
+                    d_ci["grid_ne_lo"],
+                    d_ci["grid_ne_hi"],
+                    color=palette[m],
+                    alpha=0.14,
+                    label=lbl_ci,
+                )
         for m in ["chronaeon_timetree_seq", "chronaeon_timetree_tree", "lsd2", "treetime", "treedater", "reltime"]:
             if m not in m_dict:
                 continue

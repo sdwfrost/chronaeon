@@ -7,7 +7,13 @@ Unit and integration tests for ChronAeon TimeTree (`chronaeon.timetree`).
 import numpy as np
 import pytest
 
-from chronaeon.timetree import ChronAeonTimeTree, date_timetree, _parse_newick_adj
+from chronaeon.timetree import (
+    ChronAeonTimeTree,
+    SkylineResult,
+    compute_skyline,
+    date_timetree,
+    _parse_newick_adj,
+)
 
 
 def _simulate_sequences_and_tree(n_tips=20, mu=0.001, L=900, seed=42):
@@ -74,6 +80,17 @@ def test_timetree_from_sequences_and_tree():
     assert abs(res_tree.tmrca - true_tmrca) < 5.0
     assert abs(res_tree.rate - true_mu) < 0.0004
     assert res_tree.node_date_ci is not None and len(res_tree.node_date_ci) > 0
+
+    # 3. Coalescent skyline + 95% confidence intervals
+    sky_seq = res_seq.skyline(ci=True, n_grid=50)
+    assert isinstance(sky_seq, SkylineResult)
+    assert len(sky_seq.grid_t) == 50
+    assert sky_seq.grid_ne_lo is not None and sky_seq.grid_ne_hi is not None
+    valid = ~np.isnan(sky_seq.grid_ne)
+    assert np.all(sky_seq.grid_ne_lo[valid] <= sky_seq.grid_ne[valid] + 1e-9)
+    assert np.all(sky_seq.grid_ne[valid] <= sky_seq.grid_ne_hi[valid] + 1e-9)
+    assert np.all(sky_seq.window_ne_lo <= sky_seq.window_ne)
+    assert np.all(sky_seq.window_ne <= sky_seq.window_ne_hi)
 
 
 def test_timetree_cli(tmp_path):

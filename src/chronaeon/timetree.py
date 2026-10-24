@@ -66,7 +66,56 @@ class ChronAeonTimeTree:
     outliers: Optional[List[str]] = None
 
     def tip_dates(self) -> Dict[str, float]:
-        return {k: v for k, v in self.node_dates.items() if not str(k).startswith("internal_")}
+        return {k: v for k, v in self.node_dates.items() if not str(k).startswith("internal_") and k != "ROOT"}
+
+    def skyline(
+        self,
+        *,
+        epsilon: Optional[float] = None,
+        grid_times: Optional[np.ndarray] = None,
+        n_grid: int = 100,
+        ci: bool = True,
+        alpha: float = 0.05,
+        n_ensemble: int = 80,
+        seed: int = 42,
+    ) -> "SkylineResult":
+        """
+        Computes a heterochronous coalescent skyline trajectory N_e(t) and Lineages-Through-Time
+        (LTT) curve from this ChronAeonTimeTree, with optional 95% confidence intervals combining:
+          1. Exact Kingman coalescent waiting-time variance (chi^2_{2 r_m} / trigamma),
+          2. Dispersion-calibrated Fieller clock-rate uncertainty (g, N_eff), and
+          3. Branch-length overdispersion (phi_eff) + horizontal time-shift ensemble propagation.
+        """
+        return compute_skyline(
+            self,
+            epsilon=epsilon,
+            grid_times=grid_times,
+            n_grid=n_grid,
+            ci=ci,
+            alpha=alpha,
+            n_ensemble=n_ensemble,
+            seed=seed,
+        )
+
+
+@dataclass
+class SkylineResult:
+    """Coalescent skyline N_e(t) and Lineages-Through-Time (LTT) result with 95% CIs."""
+
+    grid_t: np.ndarray
+    grid_ne: np.ndarray
+    grid_ne_lo: Optional[np.ndarray]
+    grid_ne_hi: Optional[np.ndarray]
+    grid_ltt: np.ndarray
+    window_t: np.ndarray
+    window_ne: np.ndarray
+    window_ne_lo: Optional[np.ndarray]
+    window_ne_hi: Optional[np.ndarray]
+    window_coals: np.ndarray
+    ltt_t: np.ndarray
+    ltt_k: np.ndarray
+    epsilon: float
+    quantum_dt: float
 
 
 # =========================================================================
@@ -1013,6 +1062,7 @@ def date_timetree(
             "d_root": d_root,
             "d_prof": d_prof,
             "z_scores": z_scores,
+            "seq_length": seq_length,
         },
         tmrca_ci=tmrca_ci,
         rate_ci=rate_ci,
@@ -1023,4 +1073,252 @@ def date_timetree(
         dispersion=phi_eff,
         communities=communities,
         outliers=outliers,
+    )
+
+
+# =========================================================================
+# 6. Coalescent Skyline & LTT Estimation with Analytical + Ensemble CIs
+# =========================================================================
+
+def compute_skyline(
+    tt: ChronAeonTimeTree,
+    *,
+    epsilon: Optional[float] = None,
+    grid_times: Optional[np.ndarray] = None,
+    n_grid: int = 100,
+    ci: bool = True,
+    alpha: float = 0.05,
+    n_ensemble: int = 80,
+    seed: int = 42,
+) -> SkylineResult:
+    """
+    Computes a generalized heterochronous coalescent skyline N_e(t) and LTT trajectory
+    from a `ChronAeonTimeTree`, with analytical + ensemble (1 - alpha) confidence intervals.
+
+    Uncertainty propagation combines three orthogonal components via the Law of Total Variance:
+      1. Coalescent process waiting-time variance conditional on node dates:
+            2 r_m * N_e_hat(W_m) / N_e(W_m) ~ chi^2_{2 r_m}
+      2. Global clock-rate Fieller uncertainty (sigma_mu^2 = g / t_crit^2)
+      3. Branch-level overdispersion (phi_eff) and horizontal time-shift ensemble draws.
+    """
+    sample_times = np.sort(
+        np.array(
+            [float(v) for k, v in tt.node_dates.items() if k != "ROOT" and not str(k).startswith("internal_")],
+            dtype=np.float64,
+        )
+    )
+    coal_times = np.sort(
+        np.array(
+            [float(v) for k, v in tt.node_dates.items() if k == "ROOT" or str(k).startswith("internal_")],
+            dtype=np.float64,
+        )
+    )
+    if len(coal_times) == 0 or len(sample_times) < 2:
+        raise ValueError("ChronAeonTimeTree must contain at least 2 tips and 1 internal node for skyline inference.")
+
+    mu_hat = max(float(tt.rate or 1e-3), 1e-7)
+    seq_len = int((tt.raw or {}).get("seq_length", 1000)) if isinstance(tt.raw, dict) else 1000
+    L_eff = float(max(seq_len, 100))
+    quantum_dt = 1.0 / (mu_hat * L_eff)
+
+    t_min_tree = float(coal_times[0])
+    t_max_tree = float(sample_times[-1])
+    span = max(t_max_tree - t_min_tree, 1e-5)
+
+    if epsilon is None:
+        epsilon = max(quantum_dt, 0.035 * span)
+    eps_val = float(epsilon)
+
+    # Build elementary heterochronous intervals moving backward from t_max_tree to t_min_tree
+    events: List[Tuple[float, int]] = []
+    for t in sample_times:
+        events.append((float(t), +1))
+    for t in coal_times:
+        events.append((float(t), -1))
+    events.sort(key=lambda x: (-x[0], -x[1]))
+
+    k = 0
+    t_prev = events[0][0]
+    elem_t_start, elem_t_end, elem_k, elem_is_coal = [], [], [], []
+    ltt_t, ltt_k = [t_prev], [0]
+
+    for t_curr, delta in events:
+        dt = max(0.0, t_prev - t_curr)
+        is_c = (delta == -1)
+        if dt > 0.0 or is_c:
+            elem_t_start.append(t_prev)
+            elem_t_end.append(t_curr)
+            elem_k.append(max(k, 2 if is_c else k))
+            elem_is_coal.append(is_c)
+        k += delta
+        t_prev = t_curr
+        ltt_t.append(t_curr)
+        ltt_k.append(max(0, k))
+
+    # Pool elementary intervals into generalized skyline windows (span >= eps_val, r_m >= min_r)
+    min_r = 2 if (epsilon is None and len(coal_times) >= 12) else 1
+    win_mid_t, win_dt, win_ne, win_r = [], [], [], []
+    acc_binom_dt = 0.0
+    acc_dt = 0.0
+    acc_coals = 0
+    cur_t_hi = elem_t_start[0] if elem_t_start else t_max_tree
+
+    for t_hi, t_lo, k_val, is_c in zip(elem_t_start, elem_t_end, elem_k, elem_is_coal):
+        dt = max(0.0, t_hi - t_lo)
+        binom = 0.5 * k_val * (k_val - 1) if k_val >= 2 else 0.0
+        acc_binom_dt += binom * dt
+        acc_dt += dt
+        if is_c:
+            acc_coals += 1
+        if acc_coals >= min_r and acc_dt >= eps_val:
+            ne_val = max(1e-3, acc_binom_dt / acc_coals)
+            win_mid_t.append(0.5 * (cur_t_hi + t_lo))
+            win_dt.append(max(acc_dt, quantum_dt))
+            win_ne.append(ne_val)
+            win_r.append(acc_coals)
+            acc_binom_dt = 0.0
+            acc_dt = 0.0
+            acc_coals = 0
+            cur_t_hi = t_lo
+
+    if acc_coals >= 1:
+        t_lo_last = elem_t_end[-1] if elem_t_end else cur_t_hi
+        ne_val = max(1e-3, acc_binom_dt / max(acc_coals, 1))
+        if ne_val <= 1e-3 and win_ne:
+            ne_val = win_ne[-1]
+        win_mid_t.append(0.5 * (cur_t_hi + t_lo_last))
+        win_dt.append(max(acc_dt, quantum_dt))
+        win_ne.append(ne_val)
+        win_r.append(acc_coals)
+
+    # Reverse to chronological order (oldest -> newest)
+    window_t = np.array(win_mid_t[::-1], dtype=np.float64)
+    window_dt = np.array(win_dt[::-1], dtype=np.float64)
+    window_ne = np.array(win_ne[::-1], dtype=np.float64)
+    window_coals = np.array(win_r[::-1], dtype=np.int64)
+
+    if grid_times is None:
+        grid_t = np.linspace(t_min_tree, t_max_tree, n_grid)
+    else:
+        grid_t = np.asarray(grid_times, dtype=np.float64)
+
+    def _interp_skyline_on_grid(w_t: np.ndarray, w_val: np.ndarray, g_t: np.ndarray, t_lo_b: float, t_hi_b: float) -> np.ndarray:
+        out = np.full(len(g_t), np.nan, dtype=np.float64)
+        mask = (g_t >= t_lo_b) & (g_t <= t_hi_b)
+        if not np.any(mask) or len(w_t) == 0:
+            return out
+        if len(w_t) == 1:
+            out[mask] = w_val[0]
+        else:
+            log_v = np.interp(g_t[mask], w_t, np.log(np.maximum(w_val, 1e-4)))
+            out[mask] = np.exp(log_v)
+        return out
+
+    grid_ne = _interp_skyline_on_grid(window_t, window_ne, grid_t, t_min_tree, t_max_tree)
+    n_c_grid = np.searchsorted(coal_times, grid_t, side="right")
+    n_s_grid = np.searchsorted(sample_times, grid_t, side="right")
+    grid_ltt = np.where(grid_t < t_min_tree, 0.0, np.maximum(0, 1 + n_c_grid - n_s_grid)).astype(np.float64)
+
+    window_ne_lo = None
+    window_ne_hi = None
+    grid_ne_lo = None
+    grid_ne_hi = None
+
+    if ci and len(window_ne) > 0:
+        df_eff = max(2.0, float(tt.n_eff or len(sample_times)) - 2.0)
+        t_crit = float(stats.t.ppf(1.0 - 0.5 * alpha, df=df_eff))
+        z_crit = float(stats.norm.ppf(1.0 - 0.5 * alpha))
+
+        # 1. Clock-rate relative standard error from Fieller g or rate_ci
+        if tt.fieller_g is not None and tt.fieller_g > 0.0:
+            rel_se_mu = math.sqrt(float(tt.fieller_g)) / max(t_crit, 1.0)
+        elif tt.rate_ci is not None and tt.rate:
+            rel_se_mu = 0.5 * (tt.rate_ci[1] - tt.rate_ci[0]) / max(t_crit * tt.rate, 1e-12)
+        else:
+            rel_se_mu = 0.12
+
+        phi_eff = max(1.0, float(tt.dispersion or 1.0))
+
+        # 2. Analytical window CIs: exact chi^2_{2 r_m} coalescent bounds + clock & branch dispersion in quadrature
+        w_lo = np.zeros_like(window_ne)
+        w_hi = np.zeros_like(window_ne)
+        for m_idx, (ne_m, r_m, dt_m) in enumerate(zip(window_ne, window_coals, window_dt)):
+            dof_c = 2.0 * float(max(r_m, 1))
+            chi2_upper = float(stats.chi2.ppf(1.0 - 0.5 * alpha, df=dof_c))
+            chi2_lower = float(stats.chi2.ppf(0.5 * alpha, df=dof_c))
+            log_coal_lo = math.log(max(chi2_upper / dof_c, 1.0001))
+            log_coal_hi = math.log(max(dof_c / max(chi2_lower, 1e-12), 1.0001))
+
+            # Branch duration variance over window W_m (scaled by phi_eff and expected mutations)
+            exp_mut_m = max(1.0, float(r_m) * mu_hat * L_eff * dt_m)
+            sigma_branch_m = math.sqrt(phi_eff / exp_mut_m)
+            extra_hw = t_crit * math.sqrt(rel_se_mu ** 2 + sigma_branch_m ** 2)
+
+            hw_lo = math.sqrt(log_coal_lo ** 2 + extra_hw ** 2)
+            hw_hi = math.sqrt(log_coal_hi ** 2 + extra_hw ** 2)
+            w_lo[m_idx] = ne_m * math.exp(-hw_lo)
+            w_hi[m_idx] = ne_m * math.exp(+hw_hi)
+
+        window_ne_lo = w_lo
+        window_ne_hi = w_hi
+
+        # 3. Continuous grid CI combining analytical window bounds with horizontal time-shift ensemble
+        interp_lo = _interp_skyline_on_grid(window_t, window_ne_lo, grid_t, t_min_tree, t_max_tree)
+        interp_hi = _interp_skyline_on_grid(window_t, window_ne_hi, grid_t, t_min_tree, t_max_tree)
+
+        if n_ensemble > 0 and len(window_t) >= 2:
+            rng = np.random.default_rng(seed)
+            t_anchor = float(np.mean(sample_times))
+            ens_draws = np.full((n_ensemble, len(grid_t)), np.nan, dtype=np.float64)
+            for b in range(n_ensemble):
+                # Draw rate scale factor kappa_b = mu^(b) / mu_hat
+                t_draw = float(rng.standard_t(df=df_eff))
+                kappa_b = math.exp(np.clip(t_draw * rel_se_mu, -0.65, 0.65))
+                # Shift window times horizontally relative to tip mean and scale N_e by 1/kappa_b
+                w_t_b = t_anchor - (t_anchor - window_t) / kappa_b
+                # Draw exact inverse-chi^2 coalescent + branch noise per window
+                dof_vec = 2.0 * np.maximum(window_coals.astype(np.float64), 1.0)
+                coal_mult = dof_vec / np.maximum(rng.chisquare(df=dof_vec), 1e-6)
+                branch_jit = np.exp(rng.normal(0.0, 0.15 * math.sqrt(phi_eff) / np.sqrt(np.maximum(window_coals, 1))))
+                w_ne_b = (window_ne / kappa_b) * coal_mult * branch_jit
+                t_lo_b = float(min(w_t_b[0], t_min_tree))
+                ens_draws[b] = _interp_skyline_on_grid(w_t_b, w_ne_b, grid_t, t_lo_b, t_max_tree)
+
+            valid_counts = np.sum(~np.isnan(ens_draws), axis=0)
+            ens_lo = np.full(len(grid_t), np.nan, dtype=np.float64)
+            ens_hi = np.full(len(grid_t), np.nan, dtype=np.float64)
+            ok = valid_counts >= max(5, n_ensemble // 5)
+            if np.any(ok):
+                ens_lo[ok] = np.nanpercentile(ens_draws[:, ok], 100.0 * (0.5 * alpha), axis=0)
+                ens_hi[ok] = np.nanpercentile(ens_draws[:, ok], 100.0 * (1.0 - 0.5 * alpha), axis=0)
+
+            grid_ne_lo = np.where(
+                ~np.isnan(interp_lo) & ~np.isnan(ens_lo),
+                np.sqrt(interp_lo * ens_lo),
+                np.where(~np.isnan(interp_lo), interp_lo, ens_lo),
+            )
+            grid_ne_hi = np.where(
+                ~np.isnan(interp_hi) & ~np.isnan(ens_hi),
+                np.sqrt(interp_hi * ens_hi),
+                np.where(~np.isnan(interp_hi), interp_hi, ens_hi),
+            )
+        else:
+            grid_ne_lo = interp_lo
+            grid_ne_hi = interp_hi
+
+    return SkylineResult(
+        grid_t=grid_t,
+        grid_ne=grid_ne,
+        grid_ne_lo=grid_ne_lo,
+        grid_ne_hi=grid_ne_hi,
+        grid_ltt=grid_ltt,
+        window_t=window_t,
+        window_ne=window_ne,
+        window_ne_lo=window_ne_lo,
+        window_ne_hi=window_ne_hi,
+        window_coals=window_coals,
+        ltt_t=np.array(ltt_t[::-1], dtype=np.float64),
+        ltt_k=np.array(ltt_k[::-1], dtype=np.float64),
+        epsilon=eps_val,
+        quantum_dt=quantum_dt,
     )
