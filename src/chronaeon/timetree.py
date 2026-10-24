@@ -1156,9 +1156,10 @@ def compute_skyline(
         ltt_k.append(max(0, k))
 
     # Pool elementary intervals into generalized skyline windows (span >= eps_val, r_m >= min_r)
-    min_r = 2 if (epsilon is None and len(coal_times) >= 12) else 1
-    win_mid_t, win_dt, win_ne, win_r = [], [], [], []
+    min_r = 2 if len(coal_times) >= 12 else 1
+    win_mid_t, win_dt, win_tree_len, win_ne, win_r = [], [], [], [], []
     acc_binom_dt = 0.0
+    acc_tree_len = 0.0
     acc_dt = 0.0
     acc_coals = 0
     cur_t_hi = elem_t_start[0] if elem_t_start else t_max_tree
@@ -1167,6 +1168,7 @@ def compute_skyline(
         dt = max(0.0, t_hi - t_lo)
         binom = 0.5 * k_val * (k_val - 1) if k_val >= 2 else 0.0
         acc_binom_dt += binom * dt
+        acc_tree_len += max(k_val, 2) * dt
         acc_dt += dt
         if is_c:
             acc_coals += 1
@@ -1174,28 +1176,54 @@ def compute_skyline(
             ne_val = max(1e-3, acc_binom_dt / acc_coals)
             win_mid_t.append(0.5 * (cur_t_hi + t_lo))
             win_dt.append(max(acc_dt, quantum_dt))
+            win_tree_len.append(max(acc_tree_len, 2.0 * quantum_dt))
             win_ne.append(ne_val)
             win_r.append(acc_coals)
             acc_binom_dt = 0.0
+            acc_tree_len = 0.0
             acc_dt = 0.0
             acc_coals = 0
             cur_t_hi = t_lo
 
     if acc_coals >= 1:
         t_lo_last = elem_t_end[-1] if elem_t_end else cur_t_hi
-        ne_val = max(1e-3, acc_binom_dt / max(acc_coals, 1))
-        if ne_val <= 1e-3 and win_ne:
-            ne_val = win_ne[-1]
-        win_mid_t.append(0.5 * (cur_t_hi + t_lo_last))
-        win_dt.append(max(acc_dt, quantum_dt))
-        win_ne.append(ne_val)
-        win_r.append(acc_coals)
+        if win_ne and acc_coals < min_r:
+            # Merge trailing single coalescence into the last window to avoid df=2 tail explosion
+            prev_r = win_r[-1]
+            tot_r = prev_r + acc_coals
+            prev_binom_dt = win_ne[-1] * prev_r
+            win_ne[-1] = max(1e-3, (prev_binom_dt + acc_binom_dt) / tot_r)
+            win_dt[-1] = max(win_dt[-1] + acc_dt, quantum_dt)
+            win_tree_len[-1] = max(win_tree_len[-1] + acc_tree_len, 2.0 * quantum_dt)
+            win_r[-1] = tot_r
+            win_mid_t[-1] = 0.5 * (win_mid_t[-1] + 0.5 * (cur_t_hi + t_lo_last))
+        else:
+            ne_val = max(1e-3, acc_binom_dt / max(acc_coals, 1))
+            if ne_val <= 1e-3 and win_ne:
+                ne_val = win_ne[-1]
+            win_mid_t.append(0.5 * (cur_t_hi + t_lo_last))
+            win_dt.append(max(acc_dt, quantum_dt))
+            win_tree_len.append(max(acc_tree_len, 2.0 * quantum_dt))
+            win_ne.append(ne_val)
+            win_r.append(acc_coals)
 
     # Reverse to chronological order (oldest -> newest)
     window_t = np.array(win_mid_t[::-1], dtype=np.float64)
     window_dt = np.array(win_dt[::-1], dtype=np.float64)
+    window_tree_len = np.array(win_tree_len[::-1], dtype=np.float64)
     window_ne = np.array(win_ne[::-1], dtype=np.float64)
     window_coals = np.array(win_r[::-1], dtype=np.int64)
+
+    # Empirical-Bayes conjugate local smoothness prior (r_prior = 2.0) + kernel tree length
+    r_prior = 2.0
+    r_eff_vec = window_coals.astype(np.float64) + r_prior
+    if len(window_t) >= 2:
+        h_bw = max(eps_val, 0.05 * span)
+        diff_mat = (window_t[:, None] - window_t[None, :]) / max(h_bw, 1e-6)
+        K_mat = np.exp(-0.5 * (diff_mat ** 2))
+        tree_len_eff_vec = np.maximum(2.0 * quantum_dt, K_mat @ window_tree_len)
+    else:
+        tree_len_eff_vec = np.maximum(2.0 * quantum_dt, window_tree_len)
 
     if grid_times is None:
         grid_t = np.linspace(t_min_tree, t_max_tree, n_grid)
@@ -1237,74 +1265,80 @@ def compute_skyline(
         else:
             rel_se_mu = 0.12
 
-        phi_eff = max(1.0, float(tt.dispersion or 1.0))
+        phi_branch_eff = min(4.0, max(1.0, float(tt.dispersion or 1.0)))
 
-        # 2. Analytical window CIs: exact chi^2_{2 r_m} coalescent bounds + clock & branch dispersion in quadrature
+        # 2. Analytical window CIs using Welch-Satterthwaite chi^2_{2 r_{eff,m}} + branch & clock variance
         w_lo = np.zeros_like(window_ne)
         w_hi = np.zeros_like(window_ne)
-        for m_idx, (ne_m, r_m, dt_m) in enumerate(zip(window_ne, window_coals, window_dt)):
-            dof_c = 2.0 * float(max(r_m, 1))
+        local_hw_lo = np.zeros_like(window_ne)
+        local_hw_hi = np.zeros_like(window_ne)
+
+        for m_idx, (ne_m, r_eff_m, tlen_m) in enumerate(zip(window_ne, r_eff_vec, tree_len_eff_vec)):
+            dof_c = 2.0 * float(r_eff_m)
             chi2_upper = float(stats.chi2.ppf(1.0 - 0.5 * alpha, df=dof_c))
             chi2_lower = float(stats.chi2.ppf(0.5 * alpha, df=dof_c))
             log_coal_lo = math.log(max(chi2_upper / dof_c, 1.0001))
             log_coal_hi = math.log(max(dof_c / max(chi2_lower, 1e-12), 1.0001))
 
-            # Branch duration variance over window W_m (scaled by phi_eff and expected mutations)
-            exp_mut_m = max(1.0, float(r_m) * mu_hat * L_eff * dt_m)
-            sigma_branch_m = math.sqrt(phi_eff / exp_mut_m)
-            extra_hw = t_crit * math.sqrt(rel_se_mu ** 2 + sigma_branch_m ** 2)
+            # Expected substitutions across all extant lineages in the local neighborhood of W_m
+            exp_mut_m = max(1.5, 0.5 * mu_hat * L_eff * float(tlen_m))
+            sigma_branch_m = math.sqrt(phi_branch_eff / exp_mut_m)
 
-            hw_lo = math.sqrt(log_coal_lo ** 2 + extra_hw ** 2)
-            hw_hi = math.sqrt(log_coal_hi ** 2 + extra_hw ** 2)
-            w_lo[m_idx] = ne_m * math.exp(-hw_lo)
-            w_hi[m_idx] = ne_m * math.exp(+hw_hi)
+            local_hw_lo[m_idx] = math.sqrt(log_coal_lo ** 2 + (z_crit * sigma_branch_m) ** 2)
+            local_hw_hi[m_idx] = math.sqrt(log_coal_hi ** 2 + (z_crit * sigma_branch_m) ** 2)
+
+            clock_hw = t_crit * rel_se_mu
+            tot_w_lo = math.sqrt(local_hw_lo[m_idx] ** 2 + clock_hw ** 2)
+            tot_w_hi = math.sqrt(local_hw_hi[m_idx] ** 2 + clock_hw ** 2)
+            w_lo[m_idx] = ne_m * math.exp(-tot_w_lo)
+            w_hi[m_idx] = ne_m * math.exp(+tot_w_hi)
 
         window_ne_lo = w_lo
         window_ne_hi = w_hi
 
-        # 3. Continuous grid CI combining analytical window bounds with horizontal time-shift ensemble
-        interp_lo = _interp_skyline_on_grid(window_t, window_ne_lo, grid_t, t_min_tree, t_max_tree)
-        interp_hi = _interp_skyline_on_grid(window_t, window_ne_hi, grid_t, t_min_tree, t_max_tree)
+        # 3. Continuous grid CI combining local coalescent/branch half-widths with clock-rate shift ensemble
+        mask_grid = (grid_t >= t_min_tree) & (grid_t <= t_max_tree)
+        grid_hw_lo = np.full(len(grid_t), np.nan, dtype=np.float64)
+        grid_hw_hi = np.full(len(grid_t), np.nan, dtype=np.float64)
+        if np.any(mask_grid):
+            if len(window_t) == 1:
+                grid_hw_lo[mask_grid] = local_hw_lo[0]
+                grid_hw_hi[mask_grid] = local_hw_hi[0]
+            else:
+                grid_hw_lo[mask_grid] = np.interp(grid_t[mask_grid], window_t, local_hw_lo)
+                grid_hw_hi[mask_grid] = np.interp(grid_t[mask_grid], window_t, local_hw_hi)
 
         if n_ensemble > 0 and len(window_t) >= 2:
             rng = np.random.default_rng(seed)
             t_anchor = float(np.mean(sample_times))
-            ens_draws = np.full((n_ensemble, len(grid_t)), np.nan, dtype=np.float64)
+            log_ens_draws = np.full((n_ensemble, len(grid_t)), np.nan, dtype=np.float64)
             for b in range(n_ensemble):
-                # Draw rate scale factor kappa_b = mu^(b) / mu_hat
+                # Draw global clock-rate scale factor kappa_b = mu^(b) / mu_hat
                 t_draw = float(rng.standard_t(df=df_eff))
-                kappa_b = math.exp(np.clip(t_draw * rel_se_mu, -0.65, 0.65))
-                # Shift window times horizontally relative to tip mean and scale N_e by 1/kappa_b
+                kappa_b = math.exp(np.clip(t_draw * rel_se_mu, -0.60, 0.60))
+                # Shift window times horizontally relative to tip mean and scale N_e vertically by 1/kappa_b
                 w_t_b = t_anchor - (t_anchor - window_t) / kappa_b
-                # Draw exact inverse-chi^2 coalescent + branch noise per window
-                dof_vec = 2.0 * np.maximum(window_coals.astype(np.float64), 1.0)
-                coal_mult = dof_vec / np.maximum(rng.chisquare(df=dof_vec), 1e-6)
-                branch_jit = np.exp(rng.normal(0.0, 0.15 * math.sqrt(phi_eff) / np.sqrt(np.maximum(window_coals, 1))))
-                w_ne_b = (window_ne / kappa_b) * coal_mult * branch_jit
+                w_ne_b = window_ne / kappa_b
                 t_lo_b = float(min(w_t_b[0], t_min_tree))
-                ens_draws[b] = _interp_skyline_on_grid(w_t_b, w_ne_b, grid_t, t_lo_b, t_max_tree)
+                ne_curve_b = _interp_skyline_on_grid(w_t_b, w_ne_b, grid_t, t_lo_b, t_max_tree)
+                valid_b = ~np.isnan(ne_curve_b) & (ne_curve_b > 0.0)
+                log_ens_draws[b, valid_b] = np.log(ne_curve_b[valid_b])
 
-            valid_counts = np.sum(~np.isnan(ens_draws), axis=0)
-            ens_lo = np.full(len(grid_t), np.nan, dtype=np.float64)
-            ens_hi = np.full(len(grid_t), np.nan, dtype=np.float64)
+            valid_counts = np.sum(~np.isnan(log_ens_draws), axis=0)
+            clock_grid_hw = np.full(len(grid_t), t_crit * rel_se_mu, dtype=np.float64)
             ok = valid_counts >= max(5, n_ensemble // 5)
             if np.any(ok):
-                ens_lo[ok] = np.nanpercentile(ens_draws[:, ok], 100.0 * (0.5 * alpha), axis=0)
-                ens_hi[ok] = np.nanpercentile(ens_draws[:, ok], 100.0 * (1.0 - 0.5 * alpha), axis=0)
+                sd_clock = np.nanstd(log_ens_draws[:, ok], axis=0)
+                clock_grid_hw[ok] = np.maximum(t_crit * rel_se_mu, z_crit * sd_clock)
 
-            grid_ne_lo = np.where(
-                ~np.isnan(interp_lo) & ~np.isnan(ens_lo),
-                np.sqrt(interp_lo * ens_lo),
-                np.where(~np.isnan(interp_lo), interp_lo, ens_lo),
-            )
-            grid_ne_hi = np.where(
-                ~np.isnan(interp_hi) & ~np.isnan(ens_hi),
-                np.sqrt(interp_hi * ens_hi),
-                np.where(~np.isnan(interp_hi), interp_hi, ens_hi),
-            )
+            tot_grid_hw_lo = np.sqrt(grid_hw_lo ** 2 + clock_grid_hw ** 2)
+            tot_grid_hw_hi = np.sqrt(grid_hw_hi ** 2 + clock_grid_hw ** 2)
+            grid_ne_lo = grid_ne * np.exp(-tot_grid_hw_lo)
+            grid_ne_hi = grid_ne * np.exp(+tot_grid_hw_hi)
         else:
-            grid_ne_lo = interp_lo
-            grid_ne_hi = interp_hi
+            clock_hw = t_crit * rel_se_mu
+            grid_ne_lo = grid_ne * np.exp(-np.sqrt(grid_hw_lo ** 2 + clock_hw ** 2))
+            grid_ne_hi = grid_ne * np.exp(+np.sqrt(grid_hw_hi ** 2 + clock_hw ** 2))
 
     return SkylineResult(
         grid_t=grid_t,

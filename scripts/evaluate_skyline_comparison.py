@@ -604,6 +604,7 @@ def run_all():
                     ci_cov = np.nan
                     if m in ("chronaeon_timetree_seq", "chronaeon_timetree_tree"):
                         ca_sky = res.skyline(epsilon=0.6, grid_times=grid_t, ci=True)
+                        sky["grid_ne"] = ca_sky.grid_ne
                         agg_ne_lo[m].append(ca_sky.grid_ne_lo)
                         agg_ne_hi[m].append(ca_sky.grid_ne_hi)
                         valid_ci = valid & (~np.isnan(ca_sky.grid_ne_lo)) & (~np.isnan(ca_sky.grid_ne_hi))
@@ -731,6 +732,7 @@ def run_all():
                 ne_lo_emp, ne_hi_emp = None, None
                 if m in ("chronaeon_timetree_seq", "chronaeon_timetree_tree"):
                     ca_emp_sky = res.skyline(epsilon=eps_val, grid_times=grid_emp, ci=True)
+                    sky["grid_ne"] = ca_emp_sky.grid_ne
                     ne_lo_emp = ca_emp_sky.grid_ne_lo
                     ne_hi_emp = ca_emp_sky.grid_ne_hi
                 emp_curves[study_id]["methods"][m] = {
