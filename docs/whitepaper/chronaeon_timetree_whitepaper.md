@@ -29,7 +29,7 @@ Each paradigm exhibits a distinct structural limitation:
 
 ## 2. The ChronAeon TimeTree (`chronaeon.timetree`) Algorithm
 
-`chronaeon.timetree` resolves both limitations through a six-stage analytical pipeline implemented in [`chronaeon/src/chronaeon/timetree.py`](../chronaeon/src/chronaeon/timetree.py).
+`chronaeon.timetree` resolves both limitations through a six-stage analytical pipeline implemented in [`src/chronaeon/timetree.py`](../../src/chronaeon/timetree.py).
 
 ### Stage 1: Time-Decay Soft-Profile Construction & The Centering Identity
 Given tip timestamps $\mathbf{t} \in \mathbb{R}^N$ with $t_{\min} = \min_i t_i$ and $\bar{t} = \frac{1}{N}\sum_i t_i$, we define normalized exponential time-decay weights over a discrete candidate grid $\gamma \in \{0, 0.25, 0.5, 1, 2, 4, 7, 10\}$:
